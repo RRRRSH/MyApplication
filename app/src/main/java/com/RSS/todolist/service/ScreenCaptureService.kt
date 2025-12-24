@@ -20,6 +20,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
@@ -28,6 +29,7 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.RSS.todolist.R
 import com.RSS.todolist.data.*
+import com.RSS.todolist.utils.AiConfigStore
 import com.RSS.todolist.utils.ImageUtils
 import com.RSS.todolist.utils.TaskStore
 import retrofit2.Call
@@ -44,7 +46,11 @@ class ScreenCaptureService : Service() {
     private var screenHeight: Int = 0
     
     private var retryCount = 0
-    private val MAX_RETRY = 3
+    private val MAX_RETRY = 5 // 增加重试次数
+
+    // 🌟 新增：后台处理线程，专门干脏活累活
+    private lateinit var backgroundThread: HandlerThread
+    private lateinit var backgroundHandler: Handler
 
     private val actionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -71,7 +77,7 @@ class ScreenCaptureService : Service() {
     }
 
     companion object {
-        const val ACTION_INIT = "com.RSS.todolist.ACTION_INIT" // 🌟 新增：初始化动作
+        const val ACTION_INIT = "com.RSS.todolist.ACTION_INIT"
         const val ACTION_CLEAR_TASKS = "com.RSS.todolist.ACTION_CLEAR_TASKS"
         const val ACTION_COMPLETE_TASK = "com.RSS.todolist.ACTION_COMPLETE_TASK"
         const val ACTION_REFRESH = "com.RSS.todolist.ACTION_REFRESH"
@@ -84,7 +90,7 @@ class ScreenCaptureService : Service() {
     private val mediaProjectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
             super.onStop()
-            Log.d("TodoList", "MediaProjection 被系统停止")
+            Log.w("TodoList", "MediaProjection 被系统强制停止")
             stopCapture()
         }
     }
@@ -93,6 +99,12 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        
+        // 🌟 1. 启动后台线程
+        backgroundThread = HandlerThread("ScreenCaptureThread")
+        backgroundThread.start()
+        backgroundHandler = Handler(backgroundThread.looper)
+
         createNotificationChannel()
         val filter = IntentFilter().apply {
             addAction(ACTION_CLEAR_TASKS)
@@ -100,33 +112,31 @@ class ScreenCaptureService : Service() {
             addAction(ACTION_REFRESH) 
         }
         registerReceiver(actionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        // 这里的 showTaskNotification 会调用 startForeground，保证服务不死
         showTaskNotification()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(actionReceiver)
+        stopCapture()
+        // 🌟 退出后台线程
+        backgroundThread.quitSafely()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
-        
-        // 🌟 情况1：如果是应用启动时的“初始化”信号
         if (action == ACTION_INIT) {
-            Log.d("TodoList", "服务初始化启动 (不截屏)")
-            showTaskNotification() // 只要显示通知栏就行了
-            return START_STICKY // 关键：让服务粘性存活
+            showTaskNotification()
+            return START_STICKY
         }
 
-        // 🌟 情况2：如果是真正的截屏请求
         val resultCode = intent?.getIntExtra("RESULT_CODE", 0) ?: 0
         val resultData = intent?.getParcelableExtra<Intent>("DATA")
 
         if (resultCode == Activity.RESULT_OK && resultData != null) {
-            Log.d("TodoList", "收到权限数据，准备截屏...")
-            
-            // 为了保险，再次强制更新前台状态
+            Log.d("TodoList", "权限校验成功，准备截屏...")
+
+            // 前台服务必须在主线程启动
             val notification = createMainNotification("正在处理截屏...")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIFICATION_ID_MAIN, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
@@ -134,6 +144,7 @@ class ScreenCaptureService : Service() {
                 startForeground(NOTIFICATION_ID_MAIN, notification)
             }
 
+            // 获取屏幕参数
             val metrics = DisplayMetrics()
             val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             @Suppress("DEPRECATION")
@@ -141,29 +152,50 @@ class ScreenCaptureService : Service() {
             screenDensity = metrics.densityDpi
             screenWidth = metrics.widthPixels
             screenHeight = metrics.heightPixels
+
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, resultData)
+            
+            // 回调依然可以发回主线程，这不影响
             mediaProjection?.registerCallback(mediaProjectionCallback, Handler(Looper.getMainLooper()))
-            startCapture()
+
+            // 🌟 2. 将截屏逻辑扔给后台线程执行
+            backgroundHandler.post {
+                startCapture()
+            }
         } else {
-            // 其他情况（比如服务意外重启），至少保证通知栏显示出来
             showTaskNotification()
         }
         return START_STICKY
     }
     
-    // ... (以下所有方法与之前完全一致，直接保留即可) ...
+    // 🌟 此方法现在运行在后台线程
     private fun startCapture() {
         try {
-            virtualDisplay = mediaProjection?.createVirtualDisplay("ScreenCapture", screenWidth, screenHeight, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader?.surface, null, null)
+            Log.d("TodoList", "后台线程：创建虚拟屏幕...")
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture",
+                screenWidth, screenHeight, screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface, null, null
+            )
+
             retryCount = 0
-            Handler(Looper.getMainLooper()).postDelayed({ captureAndAnalyze() }, 1000)
-        } catch (e: Exception) { stopCapture() }
+            // 延时也在后台线程排队
+            backgroundHandler.postDelayed({ captureAndAnalyze() }, 1000)
+        } catch (e: Exception) {
+            Log.e("TodoList", "创建虚拟屏幕失败", e)
+            stopCapture()
+        }
     }
+    
+    // 🌟 此方法现在运行在后台线程 (最耗时的部分)
     private fun captureAndAnalyze() {
+        Log.d("TodoList", "后台线程：尝试获取图片...")
         val image = imageReader?.acquireLatestImage()
+        
         if (image != null) {
             try {
                 val planes = image.planes
@@ -171,154 +203,241 @@ class ScreenCaptureService : Service() {
                 val pixelStride = planes[0].pixelStride
                 val rowStride = planes[0].rowStride
                 val rowPadding = rowStride - pixelStride * screenWidth
+
+                // ⚠️ 极其耗时的 Bitmap 操作，以前就是这里卡死了主线程
                 var bitmap = Bitmap.createBitmap(screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
                 bitmap.copyPixelsFromBuffer(buffer)
                 bitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                
                 image.close()
-                stopCapture()
-                updateStatusNotification("正在分析...")
+                stopCapture() // 拿到图就可以关了
+
+                // 👇👇👇 🌟 新增：保存图片用于调试 (DEBUG) 👇👇👇
+                try {
+                    // 图片会保存在：/data/data/com.RSS.todolist/cache/debug_screenshot.jpg
+                    val file = java.io.File(cacheDir, "debug_screenshot.jpg")
+                    val out = java.io.FileOutputStream(file)
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+                    out.flush()
+                    out.close()
+                    Log.w("TodoList", "📸 截屏已保存，请检查: ${file.absolutePath}")
+                } catch (e: Exception) {
+                    Log.e("TodoList", "保存图片失败", e)
+                }
+                // 👆👆👆 🌟 新增结束 👆👆👆
+
+                Log.d("TodoList", "图片转换完成，开始上传OCR...")
+                updateStatusNotification("正在识别文字...")
                 performOcr(bitmap)
-            } catch (e: Exception) { image?.close(); updateStatusNotification("失败") }
-        } else { if (retryCount++ < MAX_RETRY) Handler(Looper.getMainLooper()).postDelayed({ captureAndAnalyze() }, 1000) else stopCapture() }
+            } catch (e: Exception) {
+                Log.e("TodoList", "图片处理异常", e)
+                image?.close()
+                updateStatusNotification("图片处理失败")
+            }
+        } else {
+            if (retryCount < MAX_RETRY) {
+                retryCount++
+                Log.w("TodoList", "ImageReader 还没准备好，重试 $retryCount...")
+                backgroundHandler.postDelayed({ captureAndAnalyze() }, 500) // 缩短重试间隔
+            } else {
+                Log.e("TodoList", "多次重试失败")
+                updateStatusNotification("无法获取屏幕画面")
+                stopCapture()
+            }
+        }
     }
+
     private fun performOcr(bitmap: Bitmap) {
+        val appConfig = AiConfigStore.getConfig(this)
+        val ocrConfig = appConfig.ocr
+
+        if (ocrConfig.apiKey.isBlank()) {
+            updateStatusNotification("请设置 OCR API Key")
+            return
+        }
+
+        // 🌟 Base64 转换也很耗时，现在在后台线程很安全
         val base64Img = ImageUtils.bitmapToBase64(bitmap)
         val contentPart = ContentPart(type = "image_url", image_url = ImageUrl("data:image/jpeg;base64,$base64Img"))
-
-        // 🌟 核心修改：增加一个文本 Prompt，强制它进行 OCR
         val textPrompt = ContentPart(type = "text", text = "请直接提取图片中的所有文字，不要进行描述，不要翻译，直接输出识别到的内容。")
-
-        // 把图片和提示词一起发过去
+        
         val message = ChatMessage(role = "user", content = listOf(textPrompt, contentPart))
+        val request = ChatRequest(model = ocrConfig.modelName, messages = listOf(message))
 
-        val request = ChatRequest(model = SparkConfig.MODEL_OCR, messages = listOf(message))
-
-        RetrofitClient.api.chat(request).enqueue(object : Callback<ChatResponse> {
+        // Retrofit 本身就是异步的，所以这里回调回来会在主线程，这没问题
+        AiNetwork.createService(ocrConfig).chat(request).enqueue(object : Callback<ChatResponse> {
             override fun onResponse(call: Call<ChatResponse>, response: Response<ChatResponse>) {
                 val text = response.body()?.choices?.firstOrNull()?.message?.content
-                if (!text.isNullOrEmpty()) {
-                    Log.d("TodoList", "OCR 成功: $text")
-                    performAnalysis(text)
+    
+                // 👇👇👇 修改这一段日志 👇👇👇
+                Log.w("TodoList", "OCR 原始返回内容: [$text]") // 用 [] 包起来，看有没有空格
+                Log.w("TodoList", "OCR 文本长度: ${text?.length}")
+                
+                if (!text.isNullOrEmpty() && text.length > 5) { // 🌟 增加一个长度过滤，太短的直接忽略
+                    performAnalysis(text) 
                 } else {
-                    Log.e("TodoList", "OCR 结果为空")
-                    updateStatusNotification("文字识别失败")
+                    Log.e("TodoList", "OCR 结果太短或为空，视为识别失败")
+                    updateStatusNotification("未识别到有效文字")
                 }
             }
             override fun onFailure(call: Call<ChatResponse>, t: Throwable) {
-                Log.e("TodoList", "OCR 网络请求失败", t)
-                updateStatusNotification("网络错误")
+                Log.e("TodoList", "OCR 网络错误", t)
+                updateStatusNotification("网络错误: ${t.message}")
             }
         })
     }
-    private fun performAnalysis(ocrText: String) {
-        updateStatusNotification("正在提炼核心任务...")
 
-        // 🌟 针对性优化的 Prompt
+    private fun performAnalysis(ocrText: String) {
+        updateStatusNotification("正在智能分析...")
+        val appConfig = AiConfigStore.getConfig(this)
+        val anaConfig = appConfig.analysis
+
+        if (anaConfig.apiKey.isBlank()) {
+            updateStatusNotification("请设置分析模型 API Key")
+            return
+        }
+
         val prompt = """
             你是一个任务提取机器。你的唯一工作是从杂乱的 OCR 文字中提取一条【核心待办】。
-            
             不管原文是中文还是英文，请严格遵守以下步骤：
-            1. 🗑️ **丢弃垃圾信息**：无视所有“状态栏时间”（如 11:15 AM）、“应用标题”（如 Texting with...）、“人名”、“电量”等。
-            2. 🎯 **定位核心**：找到原文中提到的【将来要做的事】和【具体执行时间】以及【具体地点】。
+            1. 🗑️ **丢弃垃圾信息**：无视所有“状态栏时间”、“应用标题”、“人名”、“电量”等。
+            2. 🎯 **定位核心**：找到原文中提到的【将来要做的事】和【具体执行时间】。
             3. 🇨🇳 **输出中文**：如果原文是英文，请翻译成简练的中文。
-            4. 📝 **固定格式**：输出必须是“[时间] [事件] [地点]”。
-            
-            ---
-            学习案例：
-            输入："11:15 AM Texting with 123\n11:15 AM I need go to dinner at 20:00"
-            输出："20:00 去吃晚餐"
-            
-            输入："< Back Message\nJohn: Meeting tomorrow 9am"
-            输出："明天上午9点 开会"
-            
-            输入："备忘录\n1. 买咖啡"
-            输出："买咖啡"
-            ---
+            4. 📝 **固定格式**：输出必须是“[时间] [事件]”。
             
             待处理文字：
             $ocrText
         """.trimIndent()
 
         val message = ChatMessage(role = "user", content = prompt)
-        val request = ChatRequest(model = SparkConfig.MODEL_QWEN, messages = listOf(message))
+        val request = ChatRequest(model = anaConfig.modelName, messages = listOf(message))
 
-        RetrofitClient.api.chat(request).enqueue(object : Callback<ChatResponse> {
+        AiNetwork.createService(anaConfig).chat(request).enqueue(object : Callback<ChatResponse> {
             override fun onResponse(call: Call<ChatResponse>, response: Response<ChatResponse>) {
                 var task = response.body()?.choices?.firstOrNull()?.message?.content
-
                 if (!task.isNullOrEmpty()) {
-                    // 🧹 二次清洗：有时候模型比较啰嗦，可能会带上 "输出：" 这种前缀
-                    task = task.replace("输出：", "")
-                        .replace("Output:", "")
-                        .replace("Task:", "")
-                        .replace("\"", "") // 去掉引号
-                        .trim()
-
+                    task = task.replace("输出：", "").replace("Output:", "").replace("Task:", "").replace("\"", "").trim()
                     if (task != "无任务") {
-                        Log.d("TodoList", "AI 提炼成功: $task")
+                        Log.d("TodoList", "AI 分析成功: $task")
                         TaskStore.addTask(this@ScreenCaptureService, task)
                         showTaskNotification()
                     } else {
                         showTaskNotification()
                     }
                 } else {
-                    showTaskNotification()
+                    updateStatusNotification("分析无结果")
                 }
             }
             override fun onFailure(call: Call<ChatResponse>, t: Throwable) {
-                Log.e("TodoList", "AI 分析失败", t)
-                updateStatusNotification("分析失败")
+                updateStatusNotification("分析失败: ${t.message}")
             }
         })
     }
-    private fun stopCapture() { try { mediaProjection?.unregisterCallback(mediaProjectionCallback); virtualDisplay?.release(); imageReader?.close(); mediaProjection?.stop() } catch (e: Exception) {} }
-    private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("todo_service", "Screen Analysis", NotificationManager.IMPORTANCE_DEFAULT)) } }
+
+    private fun stopCapture() {
+        try {
+            mediaProjection?.unregisterCallback(mediaProjectionCallback)
+            virtualDisplay?.release()
+            imageReader?.close()
+            mediaProjection?.stop()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("todo_service", "Screen Analysis", NotificationManager.IMPORTANCE_DEFAULT)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
+
     private fun updateStatusNotification(text: String) {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notification = createMainNotification(text)
         notificationManager.notify(NOTIFICATION_ID_MAIN, notification)
     }
+
     private fun clearTaskNotifications(manager: NotificationManager) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val activeNotifs = manager.activeNotifications
-            for (notif in activeNotifs) { if (notif.id >= NOTIFICATION_ID_START) manager.cancel(notif.id) }
-        } else { for (i in NOTIFICATION_ID_START..NOTIFICATION_ID_START + 100) manager.cancel(i) }
+            for (notif in activeNotifs) {
+                if (notif.id >= NOTIFICATION_ID_START) {
+                    manager.cancel(notif.id)
+                }
+            }
+        } else {
+            for (i in NOTIFICATION_ID_START..NOTIFICATION_ID_START + 100) {
+                manager.cancel(i)
+            }
+        }
     }
+
     private fun showTaskNotification() {
         val tasks = TaskStore.getTasks(this)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         clearTaskNotifications(notificationManager)
+
         val activeCount = tasks.count { !it.isCompleted }
         val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
         val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID_MAIN, mainNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(NOTIFICATION_ID_MAIN, mainNotification)
+        
+        // 🌟🌟🌟 核心修改：区分状态 🌟🌟🌟
+        try {
+            // 只有当服务正在进行“截屏”操作时，才加 mediaProjection 类型
+            // 平时待机时（比如只是显示任务列表），不要加这个类型，否则 Android 14 会崩溃
+            // 既然录屏已经结束，或者只是刷新列表，我们不需要再声明任何特殊类型
+            try {
+                startForeground(NOTIFICATION_ID_MAIN, mainNotification)
+            } catch (e: Exception) {
+                // 忽略异常，因为服务已经在运行了，甚至不需要再次 startForeground，直接 notify 就行
+                // Log.e("TodoList", "Ignored foreground update error", e)
+            }
+        } catch (e: Exception) {
+            Log.e("TodoList", "StartForeground Error", e)
+            // 如果失败，尝试降级启动
+            try {
+                startForeground(NOTIFICATION_ID_MAIN, mainNotification)
+            } catch (e2: Exception) {
+                e2.printStackTrace()
+            }
         }
         notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
+
         tasks.forEachIndexed { index, task ->
             val notificationId = NOTIFICATION_ID_START + index
             if (!task.isCompleted) {
-                val completeIntent = Intent(ACTION_COMPLETE_TASK).apply { setPackage(packageName); putExtra(EXTRA_TASK_INDEX, index) }
-                val completePendingIntent = PendingIntent.getBroadcast(this, index, completeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                val completeIntent = Intent(ACTION_COMPLETE_TASK).apply {
+                    setPackage(packageName)
+                    putExtra(EXTRA_TASK_INDEX, index)
+                }
+                val completePendingIntent = PendingIntent.getBroadcast(
+                    this, index, completeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+
                 val taskNotification = NotificationCompat.Builder(this, "todo_service")
                     .setContentTitle("待办事项 ${index + 1}")
                     .setContentText(task.text)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(task.text))
                     .setSmallIcon(R.mipmap.ic_launcher)
-                    .setOngoing(true).setAutoCancel(false)
-                    .addAction(android.R.drawable.checkbox_on_background, "完成", completePendingIntent).build()
+                    .setOngoing(true)
+                    .setAutoCancel(false)
+                    .addAction(android.R.drawable.checkbox_on_background, "完成", completePendingIntent)
+                    .build()
+
                 notificationManager.notify(notificationId, taskNotification)
             }
         }
     }
+
     private fun createMainNotification(text: String, showClearButton: Boolean = false): Notification {
         val builder = NotificationCompat.Builder(this, "todo_service")
             .setContentTitle("TodoList 助手")
             .setContentText(text)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true).setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+
         if (showClearButton) {
             val clearIntent = Intent(ACTION_CLEAR_TASKS).apply { setPackage(packageName) }
             val clearPendingIntent = PendingIntent.getBroadcast(this, 0, clearIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
