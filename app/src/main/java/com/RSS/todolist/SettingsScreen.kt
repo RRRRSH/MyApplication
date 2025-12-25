@@ -24,6 +24,7 @@ import com.RSS.todolist.utils.AppAiConfig
 fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val currentConfig = remember { AiConfigStore.getConfig(context) }
+    val usingDebugDefaults = remember { AiConfigStore.isUsingDebugDefaults(context) }
 
     // OCR 状态
     var ocrBaseUrl by remember { mutableStateOf(currentConfig.ocr.baseUrl) }
@@ -60,6 +61,19 @@ fun SettingsScreen(onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
+            // 如果正在使用内置调试 Key，显示醒目提示
+            if (usingDebugDefaults) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("⚠️ 正在使用内置调试 API Key", color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 14.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("当前为调试默认配置，发布前请务必移除或替换为你自己的 Key", color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
             // 1. 核心模型配置 (OCR/通用)
             ConfigSection(
                 title = if (useSameConfig) "🤖 通用模型配置" else "👁️ 视觉模型 (OCR)",
