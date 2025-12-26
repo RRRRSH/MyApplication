@@ -24,6 +24,15 @@ object AiConfigStore {
     private const val DEFAULT_BASE_URL = "https://maas-api.cn-huabei-1.xf-yun.com/v1"
     private const val DEFAULT_OCR_MODEL = "xophunyuanocr"
     private const val DEFAULT_ANALYSIS_MODEL = "xop3qwen1b7"
+    // 原始默认提示词（用于推理模型提取任务）
+    private val DEFAULT_ANALYSIS_PROMPT = """
+        你是一个任务提取机器。你的唯一工作是从杂乱的 OCR 文字中提取一条【核心待办】。
+        不管原文是中文还是英文，请严格遵守以下步骤：
+        1. 🗑️ **丢弃垃圾信息**：无视所有“状态栏时间”、“应用标题”、“人名”、“电量”等。
+        2. 🎯 **定位核心**：找到原文中提到的【将来要做的事】和【具体执行时间】。
+        3. 🇨🇳 **输出中文**：如果原文是英文，请翻译成简练的中文。
+        4. 📝 **固定格式**：输出必须是“[时间] [事件]”。
+        """.trimIndent()
     // 调试默认 API Key / App ID（仅用于本地调试）
     private const val DEBUG_DEFAULT_API_KEY = "sk-wcbEvCTGAMTDwYAQ41Aa1e9f571e434dA96d81C3FeA77a67"
     private const val DEBUG_DEFAULT_APP_ID = "9f677afd"
@@ -49,6 +58,36 @@ object AiConfigStore {
 
         return AppAiConfig(ocrConfig, analysisConfig)
     }
+
+    // Prompt 读取/保存（分析模型用）
+    fun getAnalysisPrompt(context: Context): String {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("ana_prompt", DEFAULT_ANALYSIS_PROMPT) ?: DEFAULT_ANALYSIS_PROMPT
+    }
+
+    fun saveAnalysisPrompt(context: Context, prompt: String) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putString("ana_prompt", prompt)
+        }
+    }
+
+    // OCR prompt 默认与存取
+    private const val DEFAULT_OCR_PROMPT = "请直接提取图片中的所有文字，不要进行描述，不要翻译，直接输出识别到的内容。"
+
+    fun getOcrPrompt(context: Context): String {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getString("ocr_prompt", DEFAULT_OCR_PROMPT) ?: DEFAULT_OCR_PROMPT
+    }
+
+    fun saveOcrPrompt(context: Context, prompt: String) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putString("ocr_prompt", prompt)
+        }
+    }
+
+    // 返回内置原始默认提示词（不受用户已保存值影响）
+    fun getDefaultAnalysisPrompt(): String = DEFAULT_ANALYSIS_PROMPT
+    fun getDefaultOcrPrompt(): String = DEFAULT_OCR_PROMPT
 
     // 检测当前是否在使用内置的调试默认 Key（仅用于在 UI 上提示）
     fun isUsingDebugDefaults(context: Context): Boolean {

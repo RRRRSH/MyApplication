@@ -31,12 +31,18 @@ fun SettingsScreen(onBack: () -> Unit) {
     var ocrApiKey by remember { mutableStateOf(currentConfig.ocr.apiKey) }
     var ocrModel by remember { mutableStateOf(currentConfig.ocr.modelName) }
     var ocrAppId by remember { mutableStateOf(currentConfig.ocr.appId ?: "") }
+    // OCR prompt 可编辑
+    var ocrPrompt by remember { mutableStateOf(AiConfigStore.getOcrPrompt(context)) }
+    val defaultOcrPrompt = AiConfigStore.getDefaultOcrPrompt()
 
     // 分析 状态
     var anaBaseUrl by remember { mutableStateOf(currentConfig.analysis.baseUrl) }
     var anaApiKey by remember { mutableStateOf(currentConfig.analysis.apiKey) }
     var anaModel by remember { mutableStateOf(currentConfig.analysis.modelName) }
     var anaAppId by remember { mutableStateOf(currentConfig.analysis.appId ?: "") }
+    // 分析模型 prompt
+    var anaPrompt by remember { mutableStateOf(AiConfigStore.getAnalysisPrompt(context)) }
+    val defaultAnaPrompt = AiConfigStore.getDefaultAnalysisPrompt() // 原始内置默认值
 
     // 🌟 新增：控制是否同步的开关
     // 如果两个配置的 URL 和 Key 相同，默认视为开启同步
@@ -84,6 +90,38 @@ fun SettingsScreen(onBack: () -> Unit) {
                 appId = ocrAppId, onAppIdChange = { ocrAppId = it }
             )
 
+            // OCR Prompt 编辑（用于提取文本的提示词）
+            Text("OCR 提示词", fontWeight = FontWeight.Bold)
+            Text("用于控制 OCR 返回的文本格式，通常为“只返回识别到的文字”。", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            OutlinedTextField(
+                value = ocrPrompt,
+                onValueChange = { ocrPrompt = it },
+                label = { Text("OCR Prompt") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = false,
+                maxLines = 4
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    AiConfigStore.saveOcrPrompt(context, ocrPrompt)
+                    Toast.makeText(context, "OCR Prompt 已保存", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text("保存 OCR Prompt")
+                }
+                TextButton(onClick = {
+                    ocrPrompt = defaultOcrPrompt
+                    AiConfigStore.saveOcrPrompt(context, defaultOcrPrompt)
+                    Toast.makeText(context, "已重置为默认 OCR Prompt", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text("重置为默认")
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("当前默认 OCR 提示词（供参考）：", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceVariant) {
+                Text(text = defaultOcrPrompt, modifier = Modifier.padding(8.dp))
+            }
+
             HorizontalDivider()
 
             // 🌟 开关区域
@@ -116,6 +154,41 @@ fun SettingsScreen(onBack: () -> Unit) {
                 HorizontalDivider()
             }
 
+            // Prompt 编辑区域（用于分析模型）
+            Text("推理模型提示词 (Prompt)", fontWeight = FontWeight.Bold)
+            Text("编辑用于将 OCR 文本转换为标准待办的提示词。可点击重置为默认值。", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            OutlinedTextField(
+                value = anaPrompt,
+                onValueChange = { anaPrompt = it },
+                label = { Text("Analysis Prompt") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 120.dp),
+                singleLine = false,
+                maxLines = 10
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    // 保存时会另存 prompt
+                    AiConfigStore.saveAnalysisPrompt(context, anaPrompt)
+                    Toast.makeText(context, "Prompt 已保存", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text("保存 Prompt")
+                }
+                TextButton(onClick = {
+                    anaPrompt = defaultAnaPrompt
+                    AiConfigStore.saveAnalysisPrompt(context, defaultAnaPrompt)
+                    Toast.makeText(context, "已重置为默认 Prompt", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text("重置为默认")
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("当前默认提示词（供参考）：", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+            Surface(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceVariant) {
+                Text(text = defaultAnaPrompt, modifier = Modifier.padding(8.dp))
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
 
             // 保存按钮
@@ -134,6 +207,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                     
                     AiConfigStore.saveConfig(context, AppAiConfig(newOcr, newAna))
+                    // 同步保存 prompt
+                    AiConfigStore.saveAnalysisPrompt(context, anaPrompt)
+                    AiConfigStore.saveOcrPrompt(context, ocrPrompt)
                     Toast.makeText(context, "配置已保存", Toast.LENGTH_SHORT).show()
                     onBack()
                 },

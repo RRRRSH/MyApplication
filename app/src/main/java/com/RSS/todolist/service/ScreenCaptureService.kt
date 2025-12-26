@@ -260,7 +260,8 @@ class ScreenCaptureService : Service() {
         // 🌟 Base64 转换也很耗时，现在在后台线程很安全
         val base64Img = ImageUtils.bitmapToBase64(bitmap)
         val contentPart = ContentPart(type = "image_url", image_url = ImageUrl("data:image/jpeg;base64,$base64Img"))
-        val textPrompt = ContentPart(type = "text", text = "请直接提取图片中的所有文字，不要进行描述，不要翻译，直接输出识别到的内容。")
+        val ocrPromptText = AiConfigStore.getOcrPrompt(this)
+        val textPrompt = ContentPart(type = "text", text = ocrPromptText)
         
         val message = ChatMessage(role = "user", content = listOf(textPrompt, contentPart))
         val request = ChatRequest(model = ocrConfig.modelName, messages = listOf(message))
@@ -298,17 +299,13 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        val prompt = """
-            你是一个任务提取机器。你的唯一工作是从杂乱的 OCR 文字中提取一条【核心待办】。
-            不管原文是中文还是英文，请严格遵守以下步骤：
-            1. 🗑️ **丢弃垃圾信息**：无视所有“状态栏时间”、“应用标题”、“人名”、“电量”等。
-            2. 🎯 **定位核心**：找到原文中提到的【将来要做的事】和【具体执行时间】。
-            3. 🇨🇳 **输出中文**：如果原文是英文，请翻译成简练的中文。
-            4. 📝 **固定格式**：输出必须是“[时间] [事件]”。
-            
-            待处理文字：
-            $ocrText
-        """.trimIndent()
+        // 使用可配置的 prompt（可在设置页修改），并将 OCR 文本追加到模板末尾
+        val template = AiConfigStore.getAnalysisPrompt(this)
+        val prompt = buildString {
+            append(template)
+            append("\n\n待处理文字：\n")
+            append(ocrText)
+        }
 
         val message = ChatMessage(role = "user", content = prompt)
         val request = ChatRequest(model = anaConfig.modelName, messages = listOf(message))
