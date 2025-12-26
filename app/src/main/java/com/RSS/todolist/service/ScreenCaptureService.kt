@@ -443,6 +443,10 @@ class ScreenCaptureService : Service() {
             val clearPendingIntent = PendingIntent.getBroadcast(this, 0, clearIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             builder.addAction(android.R.drawable.ic_menu_delete, "清空所有", clearPendingIntent)
         }
+        // 添加截屏触发按钮，点击会启动一个透明 Activity 请求截屏授权并把结果发给 Service
+        val captureIntent = Intent(this, com.RSS.todolist.CaptureStarterActivity::class.java)
+        val capturePending = PendingIntent.getActivity(this, 999, captureIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        builder.addAction(android.R.drawable.ic_menu_camera, "截屏识别", capturePending)
         return builder.build()
     }
 }
