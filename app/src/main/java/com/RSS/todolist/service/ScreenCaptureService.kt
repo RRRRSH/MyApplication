@@ -27,6 +27,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import android.graphics.BitmapFactory
 import com.RSS.todolist.R
 import com.RSS.todolist.data.*
 import com.RSS.todolist.utils.AiConfigStore
@@ -419,7 +420,9 @@ class ScreenCaptureService : Service() {
                     .setContentTitle("待办事项 ${index + 1}")
                     .setContentText(task.text)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(task.text))
-                    .setSmallIcon(R.mipmap.ic_launcher)
+                    // 使用圆形启动图作为 small icon（兼容性更好），并设置 large icon 为用户图片以便在展开通知中显示
+                    .setSmallIcon(R.mipmap.ic_launcher_round)
+                    .setLargeIcon(BitmapFactory.decodeResource(resources, com.RSS.todolist.R.drawable.gemini_generated_image))
                     .setOngoing(true)
                     .setAutoCancel(false)
                     .addAction(android.R.drawable.checkbox_on_background, "完成", completePendingIntent)
@@ -434,7 +437,10 @@ class ScreenCaptureService : Service() {
         val builder = NotificationCompat.Builder(this, "todo_service")
             .setContentTitle("TodoList 助手")
             .setContentText(text)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            // smallIcon 使用圆形启动图（显示在状态栏）
+            .setSmallIcon(R.mipmap.ic_launcher_round)
+            // largeIcon 在展开通知中显示为彩色图片（使用你放入的 drawable）
+            .setLargeIcon(BitmapFactory.decodeResource(resources, com.RSS.todolist.R.drawable.gemini_generated_image))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
 
