@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">TodoList</string>
+    <string name="tile_label">TodoList 截屏</string>
 </resources>
