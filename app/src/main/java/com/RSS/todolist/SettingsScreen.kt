@@ -33,21 +33,20 @@ fun SettingsScreen(onBack: () -> Unit) {
     var ocrAppId by remember { mutableStateOf(currentConfig.ocr.appId ?: "") }
     // OCR prompt 可编辑
     var ocrPrompt by remember { mutableStateOf(AiConfigStore.getOcrPrompt(context)) }
-    val defaultOcrPrompt = AiConfigStore.getDefaultOcrPrompt()
+    var defaultOcrPrompt by remember { mutableStateOf(AiConfigStore.getSavedDefaultOcrPrompt(context)) }
 
     // 分析 状态
     var anaBaseUrl by remember { mutableStateOf(currentConfig.analysis.baseUrl) }
     var anaApiKey by remember { mutableStateOf(currentConfig.analysis.apiKey) }
     var anaModel by remember { mutableStateOf(currentConfig.analysis.modelName) }
     var anaAppId by remember { mutableStateOf(currentConfig.analysis.appId ?: "") }
-    // 分析模型 prompt
+    // 分析 模型 prompt
     var anaPrompt by remember { mutableStateOf(AiConfigStore.getAnalysisPrompt(context)) }
-    val defaultAnaPrompt = AiConfigStore.getDefaultAnalysisPrompt() // 原始内置默认值
+    var defaultAnaPrompt by remember { mutableStateOf(AiConfigStore.getSavedDefaultAnalysisPrompt(context)) } // 可编辑的默认值（持久化）
 
-    // 🌟 新增：控制是否同步的开关
-    // 如果两个配置的 URL 和 Key 相同，默认视为开启同步
+    // 🌟 新增：控制是否同步的开关（持久化）
     var useSameConfig by remember {
-        mutableStateOf(currentConfig.ocr.apiKey == currentConfig.analysis.apiKey && currentConfig.ocr.baseUrl == currentConfig.analysis.baseUrl)
+        mutableStateOf(AiConfigStore.getUseSameConfig(context))
     }
 
     Scaffold(
@@ -101,19 +100,38 @@ fun SettingsScreen(onBack: () -> Unit) {
                 singleLine = false,
                 maxLines = 4
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    AiConfigStore.saveOcrPrompt(context, ocrPrompt)
-                    Toast.makeText(context, "OCR Prompt 已保存", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("保存 OCR Prompt")
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        AiConfigStore.saveOcrPrompt(context, ocrPrompt)
+                        Toast.makeText(context, "OCR Prompt 已保存", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("保存 OCR Prompt")
+                    }
+                    TextButton(onClick = {
+                        // 重置当前编辑的 OCR prompt 为“当前默认”（可能是用户保存的默认）
+                        ocrPrompt = defaultOcrPrompt
+                        AiConfigStore.saveOcrPrompt(context, defaultOcrPrompt)
+                        Toast.makeText(context, "已重置为默认 OCR Prompt", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("重置为默认")
+                    }
                 }
-                TextButton(onClick = {
-                    ocrPrompt = defaultOcrPrompt
-                    AiConfigStore.saveOcrPrompt(context, defaultOcrPrompt)
-                    Toast.makeText(context, "已重置为默认 OCR Prompt", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("重置为默认")
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                    TextButton(onClick = {
+                        AiConfigStore.saveDefaultOcrPrompt(context, ocrPrompt)
+                        defaultOcrPrompt = AiConfigStore.getSavedDefaultOcrPrompt(context)
+                        Toast.makeText(context, "已将当前 OCR Prompt 保存为默认", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("保存为默认")
+                    }
+                    TextButton(onClick = {
+                        AiConfigStore.clearSavedDefaultOcrPrompt(context)
+                        defaultOcrPrompt = AiConfigStore.getSavedDefaultOcrPrompt(context)
+                        Toast.makeText(context, "已恢复内置 OCR 默认 Prompt", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("恢复内置默认")
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -131,7 +149,16 @@ fun SettingsScreen(onBack: () -> Unit) {
             ) {
                 Checkbox(
                     checked = useSameConfig,
-                    onCheckedChange = { useSameConfig = it }
+                    onCheckedChange = { checked ->
+                        useSameConfig = checked
+                        if (checked) {
+                            // 勾选时同步当前 OCR 填写的字段到分析模型字段，便于保存
+                            anaBaseUrl = ocrBaseUrl
+                            anaApiKey = ocrApiKey
+                            anaModel = ocrModel
+                            anaAppId = ocrAppId
+                        }
+                    }
                 )
                 Text(
                     text = "推理模型使用相同配置",
@@ -167,20 +194,38 @@ fun SettingsScreen(onBack: () -> Unit) {
                 singleLine = false,
                 maxLines = 10
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    // 保存时会另存 prompt
-                    AiConfigStore.saveAnalysisPrompt(context, anaPrompt)
-                    Toast.makeText(context, "Prompt 已保存", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("保存 Prompt")
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        // 保存时会另存 prompt
+                        AiConfigStore.saveAnalysisPrompt(context, anaPrompt)
+                        Toast.makeText(context, "Prompt 已保存", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("保存 Prompt")
+                    }
+                    TextButton(onClick = {
+                        anaPrompt = defaultAnaPrompt
+                        AiConfigStore.saveAnalysisPrompt(context, defaultAnaPrompt)
+                        Toast.makeText(context, "已重置为默认 Prompt", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("重置为默认")
+                    }
                 }
-                TextButton(onClick = {
-                    anaPrompt = defaultAnaPrompt
-                    AiConfigStore.saveAnalysisPrompt(context, defaultAnaPrompt)
-                    Toast.makeText(context, "已重置为默认 Prompt", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("重置为默认")
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                    TextButton(onClick = {
+                        AiConfigStore.saveDefaultAnalysisPrompt(context, anaPrompt)
+                        defaultAnaPrompt = AiConfigStore.getSavedDefaultAnalysisPrompt(context)
+                        Toast.makeText(context, "已将当前 Prompt 保存为默认", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("保存为默认")
+                    }
+                    TextButton(onClick = {
+                        AiConfigStore.clearSavedDefaultAnalysisPrompt(context)
+                        defaultAnaPrompt = AiConfigStore.getSavedDefaultAnalysisPrompt(context)
+                        Toast.makeText(context, "已恢复内置默认 Prompt", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("恢复内置默认")
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -207,6 +252,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                     
                     AiConfigStore.saveConfig(context, AppAiConfig(newOcr, newAna))
+                    // 保存是否使用相同配置的状态
+                    AiConfigStore.saveUseSameConfig(context, useSameConfig)
                     // 同步保存 prompt
                     AiConfigStore.saveAnalysisPrompt(context, anaPrompt)
                     AiConfigStore.saveOcrPrompt(context, ocrPrompt)

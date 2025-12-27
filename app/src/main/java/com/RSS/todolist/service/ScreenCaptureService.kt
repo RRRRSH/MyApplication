@@ -28,6 +28,11 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import android.graphics.BitmapFactory
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
+import android.graphics.Typeface
 import com.RSS.todolist.R
 import com.RSS.todolist.data.*
 import com.RSS.todolist.utils.AiConfigStore
@@ -413,11 +418,93 @@ class ScreenCaptureService : Service() {
                     this, index, completeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
 
+                // 将 AI 输出格式化为通知显示；使用启发式解析：第一行为标题，其余行尝试对应 时间/地点/关键信息
+                val rawText = task.text ?: ""
+                val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                val titleLine = if (lines.isNotEmpty()) lines[0] else "待办事项 ${index + 1}"
+
+                var title = titleLine.replace(Regex("^##\\s*"), "").replace("**", "").trim()
+                var timeStr = ""
+                var locationStr = ""
+                var keyStr = ""
+                var brandStr = ""
+
+                val rest = if (lines.size > 1) lines.subList(1, lines.size) else emptyList()
+                // 简单规则：含时间关键词归为时间；含“关键信息/🔑/Key”归为 key；最后看到的纯数字或含短横线的优先当 key
+                val brands = listOf("顺丰", "丰巢", "菜鸟", "京东", "EMS", "申通", "中通", "圆通", "安能")
+                for (l in rest) {
+                    val low = l.lowercase()
+                    val isTime = Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(l) || l.contains("月") || low.contains("今天") || low.contains("明天") || low.contains("今晚") || low.contains("尽快")
+                    val isKeyLabel = l.contains("🔑") || l.contains("关键信息") || low.contains("key")
+                    val looksLikeCode = Regex("[0-9]{2,}-[0-9A-Za-z-]{2,}|[0-9]{4,}").containsMatchIn(l) || Regex("^[0-9A-Za-z-]{4,}$").matches(l)
+
+                    // 检测品牌词
+                    val foundBrand = brands.firstOrNull { l.contains(it, ignoreCase = true) }
+                    if (foundBrand != null && brandStr.isEmpty()) brandStr = foundBrand
+
+                    when {
+                        isKeyLabel -> keyStr = l.replace(Regex(".*?:\\s*"), "")
+                        isTime && timeStr.isEmpty() -> timeStr = l
+                        looksLikeCode && keyStr.isEmpty() -> keyStr = l
+                        locationStr.isEmpty() -> locationStr = l
+                        keyStr.isEmpty() -> keyStr = l
+                    }
+                }
+
+                if (timeStr.isEmpty() && rest.isNotEmpty()) {
+                    // 如果时间仍为空，但 rest 第一项像是时间词（例如“尽快”），尝试赋值
+                    val candidate = rest[0]
+                    if (candidate.contains("尽快") || candidate.contains("尽速") || Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(candidate)) timeStr = candidate
+                }
+                if (keyStr.isEmpty() && rest.isNotEmpty()) {
+                    keyStr = rest.last()
+                }
+
+                // 如果检测到品牌但地点不包含该品牌，则合并品牌与地点
+                if (brandStr.isNotEmpty()) {
+                    if (locationStr.isNotEmpty() && !brands.any { locationStr.contains(it, ignoreCase = true) }) {
+                        locationStr = brandStr + locationStr
+                    } else if (locationStr.isEmpty()) {
+                        val candidate = rest.firstOrNull { it.contains("站") || it.contains("柜机") || it.contains("驿") || it.contains("点") || it.contains("厅") }
+                        if (candidate != null) locationStr = brandStr + candidate else locationStr = brandStr
+                    }
+                }
+
+                // 构建带标签的展开文本（顶部先显示纯标题行，便于展开时一眼看清）
+                val contentBuilder = StringBuilder()
+                // 顶部显示纯标题（通常为地点或第一行标题）
+                contentBuilder.append(title)
+                contentBuilder.append("\n\n")
+                contentBuilder.append("⏰ 时间: ")
+                contentBuilder.append(if (timeStr.isNotEmpty()) timeStr else "尽快")
+                contentBuilder.append("\n")
+                contentBuilder.append("📍 地点: ")
+                contentBuilder.append(locationStr)
+                contentBuilder.append("\n")
+                contentBuilder.append("🔑 关键信息: ")
+                contentBuilder.append(keyStr)
+
+                val bigText = SpannableStringBuilder(contentBuilder.toString())
+                if (keyStr.isNotEmpty()) {
+                    val full = contentBuilder.toString()
+                    val keyLabel = "🔑 关键信息: "
+                    val keyStart = full.indexOf(keyLabel)
+                    if (keyStart >= 0) {
+                        val start = keyStart + keyLabel.length
+                        val end = start + keyStr.length
+                        bigText.setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        bigText.setSpan(RelativeSizeSpan(1.4f), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }
+
+                // 通知：标题显示地点（若无则显示解析到的第一行标题），内容显示关键信息（若无则回退到标题）
+                val displayTitle = if (locationStr.isNotBlank()) locationStr else title
+                val displayContent = if (keyStr.isNotBlank()) keyStr else title
+
                 val taskNotification = NotificationCompat.Builder(this, "todo_service")
-                    .setContentTitle("待办事项 ${index + 1}")
-                    .setContentText(task.text)
-                    .setStyle(NotificationCompat.BigTextStyle().bigText(task.text))
-                    // 使用圆形启动图作为 small icon（兼容性更好），并设置 large icon 为用户图片以便在展开通知中显示
+                    .setContentTitle(displayTitle)
+                    .setContentText(displayContent)
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
                     .setSmallIcon(R.mipmap.ic_launcher_round)
                     .setLargeIcon(BitmapFactory.decodeResource(resources, com.RSS.todolist.R.drawable.gemini_generated_image))
                     .setOngoing(true)

@@ -25,13 +25,47 @@ object AiConfigStore {
     private const val DEFAULT_OCR_MODEL = "xophunyuanocr"
     private const val DEFAULT_ANALYSIS_MODEL = "xop3qwen1b7"
     // 原始默认提示词（用于推理模型提取任务）
+    // 更新：强调地点要包含品牌名（如“顺丰北门驿站”），并尽量把品牌与具体位置合并为单一地点字段。
     private val DEFAULT_ANALYSIS_PROMPT = """
-        你是一个任务提取机器。你的唯一工作是从杂乱的 OCR 文字中提取一条【核心待办】。
-        不管原文是中文还是英文，请严格遵守以下步骤：
-        1. 🗑️ **丢弃垃圾信息**：无视所有“状态栏时间”、“应用标题”、“人名”、“电量”等。
-        2. 🎯 **定位核心**：找到原文中提到的【将来要做的事】和【具体执行时间】。
-        3. 🇨🇳 **输出中文**：如果原文是英文，请翻译成简练的中文。
-        4. 📝 **固定格式**：输出必须是“[时间] [事件]”。
+        # Role
+You are an advanced Text Parsing Engine. Your job is to extract one actionable To-Do item from OCR text.
+
+# Critical Constraints
+1. **IGNORE EXAMPLES**: The examples provided below are for formatting reference ONLY. Do NOT output the examples. Only process the text provided in the "TARGET INPUT" section.
+2. **NO Hallucinations**: Do not invent dates, places, or codes that do not appear in the text.
+3. **Output Language**: Simplified Chinese.
+4. **Format**: Strictly follow the Markdown template below. The `地点` field must, when possible, include a brand name plus the place (e.g. "顺丰北门驿站", "丰巢西门柜机").
+
+# Extraction Logic
+1. **Identify Action**: What is the core task? (e.g., 取快递, 参加会议, 交水电费).
+2. **Extract Time**: Look for explicit time expressions like "12月21日", "20:00", or relative terms like "今晚"、"明天"、"尽快".
+3. **Extract Location (with Brand)**: If text mentions a logistics/brand (顺丰/丰巢/菜鸟/京东/EMS/申通/中通/圆通等) and a place/站/柜机/驿站/点，combine them into a single location string (e.g. "顺丰北门驿站"). If brand appears on a separate line, merge it with the nearest location descriptor.
+4. **Extract Key ID**: Look for numeric codes or pickup codes (e.g. "889901", "3-3-21011"). Bold this in output.
+
+# Output Template
+## [Action Name] **Short Description**
+- ⏰ **时间**: [Time]
+- 📍 **地点**: [Location with brand if applicable]
+- 🔑 **关键信息**: **[Code/ID]**
+
+# Reference Examples (DO NOT COPY THESE)
+<examples>
+    Input: "丰巢 取件码889901，西门柜机"
+    Output:
+    ## [取快递] **去西门丰巢取件**
+    - ⏰ **时间**: 尽快
+    - 📍 **地点**: 丰巢西门柜机
+    - 🔑 **关键信息**: **889901**
+
+    Input: "顺丰北门驿站 取件码 3-3-21011"
+    Output:
+    ## [取快递] **去顺丰北门驿站取件**
+    - ⏰ **时间**: 尽快
+    - 📍 **地点**: 顺丰北门驿站
+    - 🔑 **关键信息**: **3-3-21011**
+</examples>
+
+# TARGET INPUT (Process THIS text only)
         """.trimIndent()
     // 调试默认 API Key / App ID（仅用于本地调试）
     private const val DEBUG_DEFAULT_API_KEY = "sk-wcbEvCTGAMTDwYAQ41Aa1e9f571e434dA96d81C3FeA77a67"
@@ -85,9 +119,62 @@ object AiConfigStore {
         }
     }
 
+    // 是否让推理模型使用与 OCR 相同配置（默认 false）
+    private const val KEY_USE_SAME_CONFIG = "use_same_config"
+
+    fun getUseSameConfig(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_USE_SAME_CONFIG, false)
+    }
+
+    fun saveUseSameConfig(context: Context, value: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_USE_SAME_CONFIG, value)
+        }
+    }
+
     // 返回内置原始默认提示词（不受用户已保存值影响）
     fun getDefaultAnalysisPrompt(): String = DEFAULT_ANALYSIS_PROMPT
     fun getDefaultOcrPrompt(): String = DEFAULT_OCR_PROMPT
+
+    // 支持“可编辑的默认 Prompt”：用户可以在设置中保存一个默认值（保存在 SharedPreferences）。
+    // 清除应用数据后该值会被移除，从而回到内置常量 DEFAULT_*。
+    private const val KEY_DEFAULT_ANA_PROMPT = "ana_default_prompt"
+    private const val KEY_DEFAULT_OCR_PROMPT = "ocr_default_prompt"
+
+    fun getSavedDefaultAnalysisPrompt(context: Context): String {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_DEFAULT_ANA_PROMPT, DEFAULT_ANALYSIS_PROMPT) ?: DEFAULT_ANALYSIS_PROMPT
+    }
+
+    fun saveDefaultAnalysisPrompt(context: Context, prompt: String) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putString(KEY_DEFAULT_ANA_PROMPT, prompt)
+        }
+    }
+
+    fun clearSavedDefaultAnalysisPrompt(context: Context) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            remove(KEY_DEFAULT_ANA_PROMPT)
+        }
+    }
+
+    fun getSavedDefaultOcrPrompt(context: Context): String {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_DEFAULT_OCR_PROMPT, DEFAULT_OCR_PROMPT) ?: DEFAULT_OCR_PROMPT
+    }
+
+    fun saveDefaultOcrPrompt(context: Context, prompt: String) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putString(KEY_DEFAULT_OCR_PROMPT, prompt)
+        }
+    }
+
+    fun clearSavedDefaultOcrPrompt(context: Context) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            remove(KEY_DEFAULT_OCR_PROMPT)
+        }
+    }
 
     // 检测当前是否在使用内置的调试默认 Key（仅用于在 UI 上提示）
     fun isUsingDebugDefaults(context: Context): Boolean {
