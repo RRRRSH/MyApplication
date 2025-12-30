@@ -37,6 +37,7 @@ import com.RSS.todolist.R
 import com.RSS.todolist.data.*
 import com.RSS.todolist.utils.AiConfigStore
 import com.RSS.todolist.utils.ImageUtils
+import com.RSS.todolist.utils.TaskExtraction
 import com.RSS.todolist.utils.TaskStore
 import retrofit2.Call
 import retrofit2.Callback
@@ -312,36 +313,145 @@ class ScreenCaptureService : Service() {
             return
         }
 
-        // 🌟 Base64 转换也很耗时，现在在后台线程很安全
-        val base64Img = ImageUtils.bitmapToBase64(bitmap)
-        val contentPart = ContentPart(type = "image_url", image_url = ImageUrl("data:image/jpeg;base64,$base64Img"))
-        val ocrPromptText = AiConfigStore.getOcrPrompt(this)
-        val textPrompt = ContentPart(type = "text", text = ocrPromptText)
-        
-        val message = ChatMessage(role = "user", content = listOf(textPrompt, contentPart))
-        val request = ChatRequest(model = ocrConfig.modelName, messages = listOf(message))
+        // OCR 对小字边缘很敏感：默认质量 60 容易糊字。
+        // 策略：先用较高质量跑一次；若结果“像摘要/过短/单行”，再用更高质量重试一次。
+        performOcrAttempt(bitmap, attempt = 1)
+    }
 
-        // Retrofit 本身就是异步的，所以这里回调回来会在主线程，这没问题
-        AiNetwork.createService(ocrConfig).chat(request).enqueue(object : Callback<ChatResponse> {
-            override fun onResponse(call: Call<ChatResponse>, response: Response<ChatResponse>) {
-                val text = response.body()?.choices?.firstOrNull()?.message?.content
-    
-                // 👇👇👇 修改这一段日志 👇👇👇
-                Log.w("TodoList", "OCR 原始返回内容: [$text]") // 用 [] 包起来，看有没有空格
-                Log.w("TodoList", "OCR 文本长度: ${text?.length}")
-                
-                if (!text.isNullOrEmpty() && text.length > 5) { // 🌟 增加一个长度过滤，太短的直接忽略
-                    performAnalysis(text) 
-                } else {
-                    Log.e("TodoList", "OCR 结果太短或为空，视为识别失败")
-                    updateStatusNotification("未识别到有效文字")
+    private fun performOcrAttempt(bitmap: Bitmap, attempt: Int) {
+        val appConfig = AiConfigStore.getConfig(this)
+        val ocrConfig = appConfig.ocr
+        val userPromptFromSettings = AiConfigStore.getOcrPrompt(this)
+
+        // 强约束：要求输出被 <OCR>...</OCR> 包裹，便于我们提取正文并识别“摘要式输出”
+        val strictSuffix = """
+
+IMPORTANT:
+- You are doing OCR. Output ONLY the raw text in the image.
+- Do NOT describe, summarize, or explain.
+- Do NOT translate.
+- Preserve line breaks.
+- Wrap the final result strictly between tags:
+<OCR>
+...
+</OCR>
+""".trimIndent()
+
+        val prompt = if (attempt <= 1) {
+            userPromptFromSettings.trim() + "\n\n" + strictSuffix
+        } else {
+            // 第二次重试：用更短更硬的提示词，避免模型“自作聪明”总结
+            """
+You are an OCR engine.
+Return ONLY the text you can read from the image.
+No extra words.
+No summary.
+No translation.
+Preserve line breaks.
+
+<OCR>
+...text from image...
+</OCR>
+""".trimIndent()
+        }
+
+        val system = ChatMessage(
+            role = "system",
+            content = "You are a precise OCR engine. Output raw text only."
+        )
+
+        // 注意：Base64 编码很耗时，强制放后台线程，避免偶发卡顿
+        backgroundHandler.post {
+            val quality = if (attempt <= 1) 85 else 95
+            val base64Img = ImageUtils.bitmapToBase64(bitmap, quality = quality)
+            val contentPart = ContentPart(type = "image_url", image_url = ImageUrl("data:image/jpeg;base64,$base64Img"))
+            val textPrompt = ContentPart(type = "text", text = prompt)
+            val user = ChatMessage(role = "user", content = listOf(textPrompt, contentPart))
+            val request = ChatRequest(model = ocrConfig.modelName, messages = listOf(system, user))
+
+            AiNetwork.createService(ocrConfig).chat(request).enqueue(object : Callback<ChatResponse> {
+                override fun onResponse(call: Call<ChatResponse>, response: Response<ChatResponse>) {
+                    val raw = response.body()?.choices?.firstOrNull()?.message?.content
+                    val extracted = extractOcrText(raw)
+
+                    Log.w("TodoList", "OCR 原始返回内容: [$raw]")
+                    Log.w("TodoList", "OCR 提取后内容: [$extracted]")
+                    Log.w("TodoList", "OCR 文本长度: ${extracted.length} (attempt=$attempt, jpegQ=$quality)")
+
+                    if (extracted.isBlank() || extracted.length <= 5) {
+                        Log.e("TodoList", "OCR 结果太短或为空，视为识别失败")
+                        updateStatusNotification("未识别到有效文字")
+                        return
+                    }
+
+                    val looksIncomplete = extracted.lines().count { it.isNotBlank() } <= 1 && extracted.length < 180
+
+                    // 识别到“摘要式输出/疑似不完整”则自动重试一次
+                    if (attempt == 1 && (isLikelyOcrSummary(extracted) || looksIncomplete)) {
+                        Log.w("TodoList", "OCR 看起来异常(摘要/不完整)，自动重试一次")
+                        updateStatusNotification("OCR 结果异常，正在重试...")
+                        performOcrAttempt(bitmap, attempt = 2)
+                        return
+                    }
+
+                    performAnalysis(extracted)
                 }
-            }
-            override fun onFailure(call: Call<ChatResponse>, t: Throwable) {
-                Log.e("TodoList", "OCR 网络错误", t)
-                updateStatusNotification("网络错误: ${t.message}")
-            }
-        })
+
+                override fun onFailure(call: Call<ChatResponse>, t: Throwable) {
+                    Log.e("TodoList", "OCR 网络错误", t)
+                    updateStatusNotification("网络错误: ${t.message}")
+                }
+            })
+        }
+    }
+
+    private fun extractOcrText(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        val normalized = raw.replace("\r\n", "\n").trim()
+
+        // 优先从 <OCR>...</OCR> 中提取
+        val tagMatch = Regex("(?s)<OCR>\\s*(.*?)\\s*</OCR>").find(normalized)
+        val inside = tagMatch?.groupValues?.getOrNull(1) ?: normalized
+
+        // 去掉常见的包装引号
+        val dequoted = inside.removeSurrounding("\"", "\"").trim()
+
+        // 过滤极常见的“包装描述行”
+        val dropLinePatterns = listOf(
+            Regex("^here'?s\\s+a\\s+text\\s+message.*", RegexOption.IGNORE_CASE),
+            Regex("^the\\s+time\\s+is\\s+.*", RegexOption.IGNORE_CASE),
+            Regex("^the\\s+text\\s+message\\s+indicates.*", RegexOption.IGNORE_CASE)
+        )
+        val cleaned = dequoted.lines().mapNotNull { line ->
+            val t = line.trim()
+            if (t.isEmpty()) return@mapNotNull ""
+            if (dropLinePatterns.any { it.matches(t) }) return@mapNotNull null
+            t.trim('"')
+        }.joinToString("\n").trim()
+
+        return cleaned
+    }
+
+    private fun isLikelyOcrSummary(text: String): Boolean {
+        val low = text.lowercase()
+        // 典型“摘要口吻”关键词
+        val triggers = listOf(
+            "indicates that",
+            "the text message",
+            "this message",
+            "suggests that",
+            "here's a text message",
+            "the time is"
+        )
+        if (triggers.any { low.contains(it) }) return true
+
+        // 如果整体看起来像一句解释（缺少换行/多样字符），也倾向判为摘要
+        val hasLineBreak = text.contains("\n")
+        val hasDigits = text.any { it.isDigit() }
+        val hasPunctuation = text.any { it in listOf(':', '：', ',', '，') }
+        if (!hasLineBreak && hasDigits && !hasPunctuation && text.length < 180) return true
+
+        return false
     }
 
     private fun performAnalysis(ocrText: String) {
@@ -359,7 +469,7 @@ class ScreenCaptureService : Service() {
         val prompt = buildString {
             append(template)
             append("\n\n待处理文字：\n")
-            append(ocrText)
+            append(TaskExtraction.formatMultiMessageInput(ocrText))
         }
 
         val message = ChatMessage(role = "user", content = prompt)
@@ -367,32 +477,142 @@ class ScreenCaptureService : Service() {
 
         AiNetwork.createService(anaConfig).chat(request).enqueue(object : Callback<ChatResponse> {
             override fun onResponse(call: Call<ChatResponse>, response: Response<ChatResponse>) {
-                var task = response.body()?.choices?.firstOrNull()?.message?.content
-                if (!task.isNullOrEmpty()) {
-                    task = task.replace("输出：", "").replace("Output:", "").replace("Task:", "").replace("\"", "").trim()
-                    if (task != "无任务") {
-                        Log.d("TodoList", "AI 分析成功: $task")
-                        TaskStore.addTask(this@ScreenCaptureService, task)
-                        // 仅添加单条通知，避免刷新全部
-                        val tasks = TaskStore.getTasks(this@ScreenCaptureService)
-                        val newIndex = tasks.size - 1
-                        addSingleTaskNotification(newIndex)
-                        val activeCount = tasks.count { !it.isCompleted }
-                        val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
-                        val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
-                        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                        notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
-                    } else {
-                        showTaskNotification()
-                    }
-                } else {
+                val raw = response.body()?.choices?.firstOrNull()?.message?.content
+                if (raw.isNullOrBlank()) {
                     updateStatusNotification("分析无结果")
+                    return
+                }
+
+                val extracted = TaskExtraction.extractTasksFromModelOutput(raw)
+                if (extracted.isEmpty()) {
+                    showTaskNotification()
+                    return
+                }
+
+                Log.d("TodoList", "AI 分析成功(多任务): ${extracted.size} 条")
+
+                // Retrofit 回调通常在主线程；批量写入与通知生成放到后台线程，降低卡顿
+                backgroundHandler.post {
+                    val range = TaskStore.addTasks(this@ScreenCaptureService, extracted)
+                    if (range == null) {
+                        showTaskNotification()
+                        return@post
+                    }
+
+                    // 逐条发布任务通知（增量，不清空其它通知）
+                    range.forEach { addSingleTaskNotification(it) }
+
+                    // 更新主通知计数
+                    val tasks = TaskStore.getTasks(this@ScreenCaptureService)
+                    val activeCount = tasks.count { !it.isCompleted }
+                    val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
+                    val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
+                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
                 }
             }
             override fun onFailure(call: Call<ChatResponse>, t: Throwable) {
                 updateStatusNotification("分析失败: ${t.message}")
             }
         })
+    }
+
+    private data class ParsedTask(
+        val title: String,
+        val time: String,
+        val location: String,
+        val key: String
+    )
+
+    private fun parseTaskMarkdown(rawText: String, fallbackTitle: String): ParsedTask {
+        val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val titleLine = lines.firstOrNull() ?: fallbackTitle
+        val title = titleLine
+            .replace(Regex("^##\\s*"), "")
+            .replace("**", "")
+            .trim()
+
+        fun cleanValue(v: String): String {
+            return v
+                .replace("**", "")
+                .replace("（", "(")
+                .replace("）", ")")
+                .trim()
+        }
+
+        fun extractAfterColon(line: String): String {
+            val cleaned = line.removePrefix("-").trim()
+            val idx = cleaned.lastIndexOf(':')
+            val idxCn = cleaned.lastIndexOf('：')
+            val cut = maxOf(idx, idxCn)
+            return if (cut >= 0 && cut + 1 < cleaned.length) cleaned.substring(cut + 1).trim() else cleaned
+        }
+
+        var timeStr = ""
+        var locationStr = ""
+        var keyStr = ""
+        var brandStr = ""
+
+        val rest = if (lines.size > 1) lines.subList(1, lines.size) else emptyList()
+        val brands = listOf("顺丰", "丰巢", "菜鸟", "京东", "EMS", "申通", "中通", "圆通", "安能")
+
+        for (line in rest) {
+            val l = line.removePrefix("-").trim()
+
+            val foundBrand = brands.firstOrNull { l.contains(it, ignoreCase = true) }
+            if (foundBrand != null && brandStr.isEmpty()) brandStr = foundBrand
+
+            val low = l.lowercase()
+            val hasTimeLabel = l.contains("时间") || l.contains("⏰")
+            val hasLocationLabel = l.contains("地点") || l.contains("📍")
+            val hasKeyLabel = l.contains("关键信息") || l.contains("🔑") || low.contains("key")
+
+            when {
+                hasTimeLabel && timeStr.isEmpty() -> timeStr = cleanValue(extractAfterColon(l))
+                hasLocationLabel && locationStr.isEmpty() -> locationStr = cleanValue(extractAfterColon(l))
+                hasKeyLabel && keyStr.isEmpty() -> keyStr = cleanValue(extractAfterColon(l))
+            }
+        }
+
+        // 兜底：旧格式/非标签行
+        if (timeStr.isEmpty() || locationStr.isEmpty() || keyStr.isEmpty()) {
+            for (line in rest) {
+                val l = line.trim()
+                val low = l.lowercase()
+                val isTime = Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(l) || l.contains("月") || low.contains("今天") || low.contains("明天") || low.contains("今晚") || low.contains("尽快")
+                val looksLikeCode = Regex("[0-9]{2,}-[0-9A-Za-z-]{2,}|[0-9]{4,}").containsMatchIn(l) || Regex("^[0-9A-Za-z-]{4,}$").matches(l)
+
+                if (timeStr.isEmpty() && isTime) timeStr = cleanValue(l)
+                if (keyStr.isEmpty() && looksLikeCode) keyStr = cleanValue(l)
+                if (locationStr.isEmpty() && !isTime && !looksLikeCode) locationStr = cleanValue(l)
+            }
+        }
+
+        fun isPlaceholder(v: String): Boolean {
+            if (v.isBlank()) return true
+            val s = v.replace("**", "").trim()
+            return s == "无" || s == "未提及" || s.contains("若无则留空") || s.contains("若文本未给出")
+        }
+
+        if (isPlaceholder(timeStr)) timeStr = ""
+        if (isPlaceholder(locationStr)) locationStr = ""
+        if (isPlaceholder(keyStr)) keyStr = ""
+
+        // 品牌合并到地点（如果地点不包含品牌）
+        if (brandStr.isNotEmpty()) {
+            if (locationStr.isNotEmpty() && !brands.any { locationStr.contains(it, ignoreCase = true) }) {
+                locationStr = brandStr + locationStr
+            } else if (locationStr.isEmpty()) {
+                locationStr = brandStr
+            }
+        }
+
+        return ParsedTask(
+            title = title,
+            time = timeStr,
+            location = locationStr,
+            key = keyStr
+        )
     }
 
     private fun stopCapture() {
@@ -476,57 +696,12 @@ class ScreenCaptureService : Service() {
                     this, index, completeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
 
-                // 将 AI 输出格式化为通知显示；使用启发式解析：第一行为标题，其余行尝试对应 时间/地点/关键信息
                 val rawText = task.text ?: ""
-                val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                val titleLine = if (lines.isNotEmpty()) lines[0] else "待办事项 ${index + 1}"
-
-                var title = titleLine.replace(Regex("^##\\s*"), "").replace("**", "").trim()
-                var timeStr = ""
-                var locationStr = ""
-                var keyStr = ""
-                var brandStr = ""
-
-                val rest = if (lines.size > 1) lines.subList(1, lines.size) else emptyList()
-                // 简单规则：含时间关键词归为时间；含“关键信息/🔑/Key”归为 key；最后看到的纯数字或含短横线的优先当 key
-                val brands = listOf("顺丰", "丰巢", "菜鸟", "京东", "EMS", "申通", "中通", "圆通", "安能")
-                for (l in rest) {
-                    val low = l.lowercase()
-                    val isTime = Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(l) || l.contains("月") || low.contains("今天") || low.contains("明天") || low.contains("今晚") || low.contains("尽快")
-                    val isKeyLabel = l.contains("🔑") || l.contains("关键信息") || low.contains("key")
-                    val looksLikeCode = Regex("[0-9]{2,}-[0-9A-Za-z-]{2,}|[0-9]{4,}").containsMatchIn(l) || Regex("^[0-9A-Za-z-]{4,}$").matches(l)
-
-                    // 检测品牌词
-                    val foundBrand = brands.firstOrNull { l.contains(it, ignoreCase = true) }
-                    if (foundBrand != null && brandStr.isEmpty()) brandStr = foundBrand
-
-                    when {
-                        isKeyLabel -> keyStr = l.replace(Regex(".*?:\\s*"), "")
-                        isTime && timeStr.isEmpty() -> timeStr = l
-                        looksLikeCode && keyStr.isEmpty() -> keyStr = l
-                        locationStr.isEmpty() -> locationStr = l
-                        keyStr.isEmpty() -> keyStr = l
-                    }
-                }
-
-                if (timeStr.isEmpty() && rest.isNotEmpty()) {
-                    // 如果时间仍为空，但 rest 第一项像是时间词（例如“尽快”），尝试赋值
-                    val candidate = rest[0]
-                    if (candidate.contains("尽快") || candidate.contains("尽速") || Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(candidate)) timeStr = candidate
-                }
-                if (keyStr.isEmpty() && rest.isNotEmpty()) {
-                    keyStr = rest.last()
-                }
-
-                // 如果检测到品牌但地点不包含该品牌，则合并品牌与地点
-                if (brandStr.isNotEmpty()) {
-                    if (locationStr.isNotEmpty() && !brands.any { locationStr.contains(it, ignoreCase = true) }) {
-                        locationStr = brandStr + locationStr
-                    } else if (locationStr.isEmpty()) {
-                        val candidate = rest.firstOrNull { it.contains("站") || it.contains("柜机") || it.contains("驿") || it.contains("点") || it.contains("厅") }
-                        if (candidate != null) locationStr = brandStr + candidate else locationStr = brandStr
-                    }
-                }
+                val parsed = parseTaskMarkdown(rawText, fallbackTitle = "待办事项 ${index + 1}")
+                val title = parsed.title
+                val timeStr = parsed.time
+                val locationStr = parsed.location
+                val keyStr = parsed.key
 
                 // 构建带标签的展开文本（顶部先显示纯标题行，便于展开时一眼看清）
                 val contentBuilder = StringBuilder()
@@ -593,50 +768,11 @@ class ScreenCaptureService : Service() {
         )
 
         val rawText = task.text ?: ""
-        val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        val titleLine = if (lines.isNotEmpty()) lines[0] else "待办事项 ${index + 1}"
-
-        var title = titleLine.replace(Regex("^##\\s*"), "").replace("**", "").trim()
-        var timeStr = ""
-        var locationStr = ""
-        var keyStr = ""
-        var brandStr = ""
-
-        val rest = if (lines.size > 1) lines.subList(1, lines.size) else emptyList()
-        val brands = listOf("顺丰", "丰巢", "菜鸟", "京东", "EMS", "申通", "中通", "圆通", "安能")
-        for (l in rest) {
-            val low = l.lowercase()
-            val isTime = Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(l) || l.contains("月") || low.contains("今天") || low.contains("明天") || low.contains("今晚") || low.contains("尽快")
-            val isKeyLabel = l.contains("🔑") || l.contains("关键信息") || low.contains("key")
-            val looksLikeCode = Regex("[0-9]{2,}-[0-9A-Za-z-]{2,}|[0-9]{4,}").containsMatchIn(l) || Regex("^[0-9A-Za-z-]{4,}$").matches(l)
-            val foundBrand = brands.firstOrNull { l.contains(it, ignoreCase = true) }
-            if (foundBrand != null && brandStr.isEmpty()) brandStr = foundBrand
-
-            when {
-                isKeyLabel -> keyStr = l.replace(Regex(".*?:\\s*"), "")
-                isTime && timeStr.isEmpty() -> timeStr = l
-                looksLikeCode && keyStr.isEmpty() -> keyStr = l
-                locationStr.isEmpty() -> locationStr = l
-                keyStr.isEmpty() -> keyStr = l
-            }
-        }
-
-        if (timeStr.isEmpty() && rest.isNotEmpty()) {
-            val candidate = rest[0]
-            if (candidate.contains("尽快") || candidate.contains("尽速") || Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(candidate)) timeStr = candidate
-        }
-        if (keyStr.isEmpty() && rest.isNotEmpty()) {
-            keyStr = rest.last()
-        }
-
-        if (brandStr.isNotEmpty()) {
-            if (locationStr.isNotEmpty() && !brands.any { locationStr.contains(it, ignoreCase = true) }) {
-                locationStr = brandStr + locationStr
-            } else if (locationStr.isEmpty()) {
-                val candidate = rest.firstOrNull { it.contains("站") || it.contains("柜机") || it.contains("驿") || it.contains("点") || it.contains("厅") }
-                if (candidate != null) locationStr = brandStr + candidate else locationStr = brandStr
-            }
-        }
+        val parsed = parseTaskMarkdown(rawText, fallbackTitle = "待办事项 ${index + 1}")
+        val title = parsed.title
+        val timeStr = parsed.time
+        val locationStr = parsed.location
+        val keyStr = parsed.key
 
         val contentBuilder = StringBuilder()
         contentBuilder.append(title)

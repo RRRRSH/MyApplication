@@ -24,25 +24,38 @@ object AiConfigStore {
     private const val DEFAULT_BASE_URL = "https://maas-api.cn-huabei-1.xf-yun.com/v1"
     private const val DEFAULT_OCR_MODEL = "xophunyuanocr"
     private const val DEFAULT_ANALYSIS_MODEL = "xop3qwen1b7"
-    // 原始默认提示词（用于推理模型提取任务）
-    // 更新：强调地点要包含品牌名（如“顺丰北门驿站”），并尽量把品牌与具体位置合并为单一地点字段。
+    // 原始默认提示词（用于推理模型从 OCR 文本中提取待办）
+    // 更新：支持“同一段 OCR 里有多个待办”，要求输出多个任务块（每个任务一个 ## 小节）。
+    // 同时强调地点要包含品牌名（如“顺丰北门驿站”），并尽量把品牌与具体位置合并为单一地点字段。
     private val DEFAULT_ANALYSIS_PROMPT = """
         # Role
-You are an advanced Text Parsing Engine. Your job is to extract one actionable To-Do item from OCR text.
+    You are an advanced Text Parsing Engine. Your job is to extract ALL actionable To-Do items from OCR text.
 
 # Critical Constraints
 1. **IGNORE EXAMPLES**: The examples provided below are for formatting reference ONLY. Do NOT output the examples. Only process the text provided in the "TARGET INPUT" section.
 2. **NO Hallucinations**: Do not invent dates, places, or codes that do not appear in the text.
 3. **Output Language**: Simplified Chinese.
 4. **Format**: Strictly follow the Markdown template below. The `地点` field must, when possible, include a brand name plus the place (e.g. "顺丰北门驿站", "丰巢西门柜机").
+5. **Multiple Tasks**: The OCR text may contain multiple actionable tasks. Extract ALL actionable tasks.
+6. **No Cross-Contamination**: Do NOT mix fields across unrelated messages. If the input contains multiple messages (e.g., lines like "短信 1:" / timestamps / blank-line separated SMS), treat each message as an independent context. A pickup code from Message A must never be assigned to an eating plan in Message B.
+7. **Time Format**: Keep time expressions as-is. Do NOT append AM/PM or invent suffixes.
+8. **Bilingual Input**: The input may contain English. You may translate the action/description to Simplified Chinese, but do NOT invent facts.
 
 # Extraction Logic
-1. **Identify Action**: What is the core task? (e.g., 取快递, 参加会议, 交水电费).
-2. **Extract Time**: Look for explicit time expressions like "12月21日", "20:00", or relative terms like "今晚"、"明天"、"尽快".
+0. **Ignore Wrappers**: If the text contains meta lines like "Here's a text message..." / "The time is ..." / surrounding quotes, ignore those wrappers and only extract tasks from the actual message content.
+1. **Identify Actions**: Find every actionable task/plan in the text (e.g., 取快递, 参加会议, 交水电费, 领取外卖, 提交材料, 吃饭, 运动/打篮球/健身…). Any sentence like "I will ..." / "我要..." / "去..." that implies an action should be treated as a task.
+2. **Extract Time**: For each task, look for explicit time expressions like "12月21日", "20:00", or relative terms like "今晚"、"明天"、"尽快".
 3. **Extract Location (with Brand)**: If text mentions a logistics/brand (顺丰/丰巢/菜鸟/京东/EMS/申通/中通/圆通等) and a place/站/柜机/驿站/点，combine them into a single location string (e.g. "顺丰北门驿站"). If brand appears on a separate line, merge it with the nearest location descriptor.
-4. **Extract Key ID**: Look for numeric codes or pickup codes (e.g. "889901", "3-3-21011"). Bold this in output.
+4. **Extract Key ID**: For each task, look for numeric codes or pickup codes (e.g. "889901", "3-3-21011"). Bold this in output.
 
-# Output Template
+# Output Rules
+- If there are NO actionable tasks, output exactly: 无任务
+- If there are one or more tasks, output one task per block using the template below.
+- If a field is missing for a task, output: 无（do not write long placeholders like “若无则留空…”）
+- Do NOT add any extra commentary, numbering, or headers beyond the blocks.
+- Separate blocks by a blank line.
+
+# Output Template (repeat for each task)
 ## [Action Name] **Short Description**
 - ⏰ **时间**: [Time]
 - 📍 **地点**: [Location with brand if applicable]
@@ -63,6 +76,18 @@ You are an advanced Text Parsing Engine. Your job is to extract one actionable T
     - ⏰ **时间**: 尽快
     - 📍 **地点**: 顺丰北门驿站
     - 🔑 **关键信息**: **3-3-21011**
+
+    Input: "I will go eat at 20:00 in KFC\n3:21 PM SMS\nyou have a SF package to receive, please go to the north gate deliver station with number : 123456\n3:21 PM"
+    Output:
+    ## [吃饭] **去KFC吃晚饭**
+    - ⏰ **时间**: 20:00
+    - 📍 **地点**: KFC
+    - 🔑 **关键信息**: **无**
+
+    ## [取快递] **去顺丰北门驿站取件**
+    - ⏰ **时间**: 尽快
+    - 📍 **地点**: 顺丰北门驿站
+    - 🔑 **关键信息**: **123456**
 </examples>
 
 # TARGET INPUT (Process THIS text only)
@@ -106,7 +131,18 @@ You are an advanced Text Parsing Engine. Your job is to extract one actionable T
     }
 
     // OCR prompt 默认与存取
-    private const val DEFAULT_OCR_PROMPT = "请直接提取图片中的所有文字，不要进行描述，不要翻译，直接输出识别到的内容。"
+    private const val DEFAULT_OCR_PROMPT = """
+    You are an OCR transcription engine.
+Return ONLY the raw text exactly as it appears in the image.
+
+Rules:
+1) Do NOT describe the image, do NOT explain, do NOT add any extra sentences.
+2) Do NOT add quotes around the text.
+3) Preserve line breaks. Output each line on its own line.
+4) Do NOT translate or rewrite.
+5) If you see multiple messages, output them in order, one line per line.
+Output plain text only.
+"""
 
     fun getOcrPrompt(context: Context): String {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)

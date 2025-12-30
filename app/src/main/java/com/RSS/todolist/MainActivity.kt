@@ -35,6 +35,7 @@ import com.RSS.todolist.data.ChatMessage
 import com.RSS.todolist.data.ChatResponse
 import com.RSS.todolist.data.AiNetwork
 import com.RSS.todolist.utils.AiConfigStore
+import com.RSS.todolist.utils.TaskExtraction
 import com.RSS.todolist.utils.TaskStore
 import com.RSS.todolist.utils.TodoTask
 import com.RSS.todolist.ui.theme.TodoListTheme
@@ -116,35 +117,28 @@ fun MainScreen(onOpenSettings: () -> Unit) {
                 val prompt = buildString {
                     append(template)
                     append("\n\n待处理文字：\n")
-                    append(dialogText)
+                    append(TaskExtraction.formatMultiMessageInput(dialogText))
                 }
                 val message = ChatMessage(role = "user", content = prompt)
                 val request = ChatRequest(model = anaConfig.modelName, messages = listOf(message))
                 AiNetwork.createService(anaConfig).chat(request).enqueue(object : retrofit2.Callback<ChatResponse> {
                     override fun onResponse(call: retrofit2.Call<ChatResponse>, response: retrofit2.Response<ChatResponse>) {
-                        var taskText = response.body()?.choices?.firstOrNull()?.message?.content
-                        if (!taskText.isNullOrEmpty()) {
-                            taskText = taskText.replace("输出：", "").replace("Output:", "").replace("Task:", "").replace("\"", "").trim()
-                            if (taskText != "无任务") {
-                                TaskStore.addTask(context, taskText)
-                                // 仅通知 Service 增加新项（包含新索引），避免刷新全部通知
-                                val tasks = TaskStore.getTasks(context)
-                                val newIndex = tasks.size - 1
-                                context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
-                                    setPackage(context.packageName)
-                                    putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
-                                })
-                            } else {
-                                // 若模型返回无任务，则回退为直接保存原始文本
-                                TaskStore.addTask(context, dialogText)
-                                val tasks = TaskStore.getTasks(context)
-                                val newIndex = tasks.size - 1
-                                context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
-                                    setPackage(context.packageName)
-                                    putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
-                                })
+                        val raw = response.body()?.choices?.firstOrNull()?.message?.content
+                        val extracted = TaskExtraction.extractTasksFromModelOutput(raw)
+
+                        if (extracted.isNotEmpty()) {
+                            val range = TaskStore.addTasks(context, extracted)
+                            if (range != null) {
+                                // 为每条新增任务增量更新通知
+                                range.forEach { idx ->
+                                    context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                                        setPackage(context.packageName)
+                                        putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, idx)
+                                    })
+                                }
                             }
                         } else {
+                            // 若模型返回无任务/不可解析，则回退为直接保存原始文本
                             TaskStore.addTask(context, dialogText)
                             val tasks = TaskStore.getTasks(context)
                             val newIndex = tasks.size - 1

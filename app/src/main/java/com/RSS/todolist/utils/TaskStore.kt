@@ -49,6 +49,18 @@ object TaskStore {
         saveTasks(context, tasks)
     }
 
+    // 批量新增任务：一次性写入，返回新增的索引范围（用于增量通知更新）
+    fun addTasks(context: Context, texts: List<String>): IntRange? {
+        val clean = texts.map { it.trim() }.filter { it.isNotBlank() }
+        if (clean.isEmpty()) return null
+
+        val tasks = getTasks(context)
+        val start = tasks.size
+        clean.forEach { tasks.add(TodoTask(it, false)) }
+        saveTasks(context, tasks)
+        return start until tasks.size
+    }
+
     // 🌟 新增：更新任务文字
     fun updateTask(context: Context, index: Int, newText: String) {
         val tasks = getTasks(context)

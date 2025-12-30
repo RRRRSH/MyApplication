@@ -1,10 +1,5 @@
 ﻿# 项目概览
 
-- 用途: 一个基于 Jetpack Compose 的 Android 待办事项应用（ToDo），具有截屏识别  OCR  智能提取任务  加入待办的能力。
-
-## 主要功能
-# 项目概览
-
 用途
 ----
 
@@ -14,7 +9,7 @@
 ----
 
 - 手动管理任务：添加、编辑、标记完成、清空。
-- 截屏识别新增任务：通过系统截屏权限捕获屏幕，上传到 OCR，再用推理模型提取一条标准任务并加入列表。
+- 截屏识别新增任务：通过系统截屏权限捕获屏幕，上传到 OCR，再用推理模型从同一张截图中提取所有待办任务并加入列表。
 - 前台服务通知：在通知栏展示任务列表、支持一键完成与清空。
 
 项目结构（重要文件）
@@ -108,6 +103,20 @@ adb logcat -s QuickCaptureTile CaptureStarterActivity ScreenCaptureService
   - 为支持增量更新，新增 `addSingleTaskNotification(index)` 帮助方法，并在广播接收逻辑中优先处理 `EXTRA_EDIT_TASK_INDEX`，其次处理 `EXTRA_NEW_TASK_INDEX`，最后才回退到全量刷新（`showTaskNotification()`）。
   - 修复了 `ScreenCaptureService.kt` 中重复声明 `EXTRA_NEW_TASK_INDEX` 常量导致的编译冲突（重复声明已移除）。
   - 注意：当前通知 id 仍基于列表索引（`NOTIFICATION_ID_START + index`），索引重排仍可能带来边界情况；推荐后续将任务改为持久 `UUID` 并基于该 `id` 生成稳定的通知 id（README 上下文中已有迁移建议）。
+
+### 2025-12-31
+- 支持“同一段 OCR / 同一张截图中提取多条待办”：
+  - 新增解析器 `TaskExtraction.extractTasksFromModelOutput()`：优先按多个 `##` 任务块拆分；无 `##` 时按空行分段兜底；识别并过滤“无任务”。
+  - 新增 `TaskStore.addTasks()` 批量写入，一次入库多条任务，并返回新增索引范围用于增量通知。
+  - `ScreenCaptureService` 与 `MainActivity` 的 LLM 路径统一改为：先 `formatMultiMessageInput()`（把 OCR/输入按短信块分段编号，降低串台）→ 模型输出多任务 → 批量入库 → 为每条新增任务逐条发布通知。
+
+- 提升 OCR 原文稳定性（避免“摘要口吻/缺行”）：
+  - OCR 提示词强制要求输出包裹在 `<OCR>...</OCR>` 中，并在本地提取标签内正文。
+  - 增加“摘要式输出/疑似不完整”检测，自动重试 1 次。
+  - OCR 图片压缩质量策略调整：attempt1 使用较高质量（85），attempt2 使用更高质量（95）。
+
+- 通知展示与解析优化：
+  - 新增 `parseTaskMarkdown()`：识别 `时间/地点/关键信息` 标签行并清理占位值（如“无/未提及/若无则留空…”），避免通知栏把整段 Markdown 当成地点。
 
 
 **Apply_patch 摘要（供审计）**
