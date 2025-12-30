@@ -84,5 +84,30 @@ adb logcat -s QuickCaptureTile CaptureStarterActivity ScreenCaptureService
 - 修复 Kotlin 常量初始化问题：将内置长文本 prompt 从 `const val` 改为 `private val`（允许 `trimIndent()`），解决编译错误。
 - 修复 Quick Tile 启动逻辑（从 `startActivityAndCollapse` 改为 `PendingIntent.send()`），并加入日志/异常处理以便诊断设备差异。
 
-(如需更详细的逐次变更记录，我可以把每次 apply_patch 的摘要追加为更细粒度日志。)
+### 2025-12-27
+- 在设置页添加并持久化“推理模型使用相同配置”开关，支持记住上次勾选状态（`AiConfigStore.kt` / `SettingsScreen.kt`）。
+- 支持可编辑的“默认 Prompt”：用户可将当前 Prompt 保存为默认或恢复内置默认，清除应用数据后回退到内置值（`AiConfigStore.kt` / `SettingsScreen.kt`）。
+- 优化设置页按钮布局：将 Prompt 区域的操作按钮分为两行（主要操作 + 次要操作）以改善排列与可用性（`SettingsScreen.kt`）。
+- 将通知内容格式化为与分析输出匹配的样式（如示例中的 Markdown 结构），并在通知中把“关键信息”放大加粗以突出显示（`ScreenCaptureService.kt`）。
+- 增强地点解析：在分析 prompt 与通知解析逻辑中优先合并品牌与地点（例如把“顺丰”与“北门驿站”合并为“顺丰北门驿站”），从而让通知标题直接显示更准确的地点信息（`AiConfigStore.kt` / `ScreenCaptureService.kt`）。
+### 2025-12-30
+- 在手动新增/编辑任务对话中加入“使用 LLM 提取信息”复选框（默认不选），位于 `MainActivity.kt` 的新增任务弹窗中。
+  - 行为：勾选后点击保存会异步调用分析模型（使用 `AiConfigStore` 中的分析配置与 Prompt），模型返回的提取结果将作为任务文本加入 `TaskStore`；若模型返回“无任务”或请求失败，则回退保存原始输入文本。
+  - 实现细节：异步调用由 `AiNetwork` 发起，回调中写入任务并通过广播 `ScreenCaptureService.ACTION_REFRESH` 更新通知栏；对话在提交后保持当前行为（立即关闭），LLM 在后台运行并在回调时更新数据。
+  - 相关文件：`app/src/main/java/com/RSS/todolist/MainActivity.kt`、`app/src/main/java/com/RSS/todolist/data/AiNetwork.kt`、`app/src/main/java/com/RSS/todolist/utils/AiConfigStore.kt`。
+
+
+**Apply_patch 摘要（供审计）**
+
+1. 添加 `getUseSameConfig` / `saveUseSameConfig` 到 `app/src/main/java/com/RSS/todolist/utils/AiConfigStore.kt`，用于持久化“推理模型使用相同配置”开关。
+2. 更新 `app/src/main/java/com/RSS/todolist/SettingsScreen.kt`：
+  - 使用 `AiConfigStore.getUseSameConfig(context)` 初始化 `useSameConfig`，在勾选时同步分析模型字段；保存时写回该布尔值。
+  - 在 Prompt 区域添加 “保存为默认” 与 “恢复内置默认” 操作，并将按钮分两行排列以改善布局。
+3. 在 `AiConfigStore.kt` 中新增可编辑的默认 Prompt API：`getSavedDefaultAnalysisPrompt` / `saveDefaultAnalysisPrompt` / `clearSavedDefaultAnalysisPrompt`，以及对应 OCR 的 `getSavedDefaultOcrPrompt` / `saveDefaultOcrPrompt` / `clearSavedDefaultOcrPrompt`，并保留内置常量 `DEFAULT_*` 作为最终回退。
+4. 修改 `app/src/main/java/com/RSS/todolist/service/ScreenCaptureService.kt`：
+  - 将 AI 分析结果按行解析，生成结构化通知内容（时间/地点/关键信息），并使用 `SpannableStringBuilder` 把关键信息加粗并放大显示。
+  - 将通知的折叠视图标题设为地点（若无则为解析到的第一行），折叠内容为仅关键信息；展开视图顶部显示纯标题行，随后显示带标签的字段。
+5. 更新默认分析 Prompt（`AiConfigStore.kt` 中的 `DEFAULT_ANALYSIS_PROMPT`），在 prompt 中明确要求合并品牌与地点（例如输出 `顺丰北门驿站`），并提供示例以引导模型输出符合新格式。
+6. 在 `ScreenCaptureService.kt` 中增加品牌识别逻辑（顺丰/丰巢/菜鸟/京东/EMS/申通/中通/圆通/安能 等），在解析结果中尽量将品牌与地点合并为 `locationStr`，以便通知标题直接显示品牌+地点。
+
 

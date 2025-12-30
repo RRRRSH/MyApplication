@@ -71,8 +71,23 @@ class ScreenCaptureService : Service() {
                 ACTION_COMPLETE_TASK -> {
                     val index = intent.getIntExtra(EXTRA_TASK_INDEX, -1)
                     if (index != -1) {
+                        // 标记为已完成（数据层）
                         TaskStore.setTaskCompleted(this@ScreenCaptureService, index, true)
-                        showTaskNotification() 
+
+                        // 只取消该条任务通知（不清除其它任务通知以避免闪烁）
+                        val notifId = NOTIFICATION_ID_START + index
+                        try {
+                            notificationManager.cancel(notifId)
+                        } catch (e: Exception) {
+                            Log.w("TodoList", "取消通知失败 id=$notifId", e)
+                        }
+
+                        // 更新主通知的计数/文本，但不要重建所有任务通知
+                        val tasks = TaskStore.getTasks(this@ScreenCaptureService)
+                        val activeCount = tasks.count { !it.isCompleted }
+                        val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
+                        val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
+                        notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
                     }
                 }
                 ACTION_REFRESH -> {

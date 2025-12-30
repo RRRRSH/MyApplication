@@ -30,6 +30,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.RSS.todolist.service.ScreenCaptureService
+import com.RSS.todolist.data.ChatRequest
+import com.RSS.todolist.data.ChatMessage
+import com.RSS.todolist.data.ChatResponse
+import com.RSS.todolist.data.AiNetwork
+import com.RSS.todolist.utils.AiConfigStore
 import com.RSS.todolist.utils.TaskStore
 import com.RSS.todolist.utils.TodoTask
 import com.RSS.todolist.ui.theme.TodoListTheme
@@ -86,11 +91,13 @@ fun MainScreen(onOpenSettings: () -> Unit) {
     var showDialog by remember { mutableStateOf(false) }
     var dialogText by remember { mutableStateOf("") }
     var editingIndex by remember { mutableIntStateOf(-1) } // -1表示新增，>=0表示编辑索引
+    var useLlm by remember { mutableStateOf(false) }
 
     // 打开弹窗的逻辑
     fun openDialog(index: Int = -1, initialText: String = "") {
         editingIndex = index
         dialogText = initialText
+        useLlm = false
         showDialog = true
     }
 
@@ -99,8 +106,47 @@ fun MainScreen(onOpenSettings: () -> Unit) {
         if (dialogText.isBlank()) return
         
         if (editingIndex == -1) {
-            // 新增
-            TaskStore.addTask(context, dialogText)
+            // 新增：支持可选 LLM 提取
+            if (useLlm) {
+                Toast.makeText(context, "正在使用 LLM 提取信息...", Toast.LENGTH_SHORT).show()
+                // 调用分析模型，异步回调添加任务
+                val appConfig = AiConfigStore.getConfig(context)
+                val anaConfig = appConfig.analysis
+                val template = AiConfigStore.getAnalysisPrompt(context)
+                val prompt = buildString {
+                    append(template)
+                    append("\n\n待处理文字：\n")
+                    append(dialogText)
+                }
+                val message = ChatMessage(role = "user", content = prompt)
+                val request = ChatRequest(model = anaConfig.modelName, messages = listOf(message))
+                AiNetwork.createService(anaConfig).chat(request).enqueue(object : retrofit2.Callback<ChatResponse> {
+                    override fun onResponse(call: retrofit2.Call<ChatResponse>, response: retrofit2.Response<ChatResponse>) {
+                        var taskText = response.body()?.choices?.firstOrNull()?.message?.content
+                        if (!taskText.isNullOrEmpty()) {
+                            taskText = taskText.replace("输出：", "").replace("Output:", "").replace("Task:", "").replace("\"", "").trim()
+                            if (taskText != "无任务") {
+                                TaskStore.addTask(context, taskText)
+                            } else {
+                                // 若模型返回无任务，则回退为直接保存原始文本
+                                TaskStore.addTask(context, dialogText)
+                            }
+                        } else {
+                            TaskStore.addTask(context, dialogText)
+                        }
+                        // 通知 Service 更新通知栏
+                        context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply { setPackage(context.packageName) })
+                    }
+
+                    override fun onFailure(call: retrofit2.Call<ChatResponse>, t: Throwable) {
+                        // 网络失败则直接保存原始文本
+                        TaskStore.addTask(context, dialogText)
+                        context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply { setPackage(context.packageName) })
+                    }
+                })
+            } else {
+                TaskStore.addTask(context, dialogText)
+            }
         } else {
             // 编辑
             TaskStore.updateTask(context, editingIndex, dialogText)
@@ -149,14 +195,21 @@ fun MainScreen(onOpenSettings: () -> Unit) {
             onDismissRequest = { showDialog = false },
             title = { Text(if (editingIndex == -1) "新增任务" else "编辑任务") },
             text = {
-                OutlinedTextField(
-                    value = dialogText,
-                    onValueChange = { dialogText = it },
-                    label = { Text("任务内容") },
-                    singleLine = false,
-                    maxLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Column {
+                    OutlinedTextField(
+                        value = dialogText,
+                        onValueChange = { dialogText = it },
+                        label = { Text("任务内容") },
+                        singleLine = false,
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = useLlm, onCheckedChange = { useLlm = it })
+                        Text("使用 LLM 提取信息", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
             },
             confirmButton = { TextButton(onClick = { saveTask() }) { Text("保存") } },
             dismissButton = { TextButton(onClick = { showDialog = false }) { Text("取消") } }
