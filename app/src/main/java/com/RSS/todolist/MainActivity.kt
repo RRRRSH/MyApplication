@@ -127,35 +127,63 @@ fun MainScreen(onOpenSettings: () -> Unit) {
                             taskText = taskText.replace("输出：", "").replace("Output:", "").replace("Task:", "").replace("\"", "").trim()
                             if (taskText != "无任务") {
                                 TaskStore.addTask(context, taskText)
+                                // 仅通知 Service 增加新项（包含新索引），避免刷新全部通知
+                                val tasks = TaskStore.getTasks(context)
+                                val newIndex = tasks.size - 1
+                                context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                                    setPackage(context.packageName)
+                                    putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
+                                })
                             } else {
                                 // 若模型返回无任务，则回退为直接保存原始文本
                                 TaskStore.addTask(context, dialogText)
+                                val tasks = TaskStore.getTasks(context)
+                                val newIndex = tasks.size - 1
+                                context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                                    setPackage(context.packageName)
+                                    putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
+                                })
                             }
                         } else {
                             TaskStore.addTask(context, dialogText)
+                            val tasks = TaskStore.getTasks(context)
+                            val newIndex = tasks.size - 1
+                            context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                                setPackage(context.packageName)
+                                putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
+                            })
                         }
-                        // 通知 Service 更新通知栏
-                        context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply { setPackage(context.packageName) })
                     }
 
                     override fun onFailure(call: retrofit2.Call<ChatResponse>, t: Throwable) {
                         // 网络失败则直接保存原始文本
                         TaskStore.addTask(context, dialogText)
-                        context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply { setPackage(context.packageName) })
+                        val tasks = TaskStore.getTasks(context)
+                        val newIndex = tasks.size - 1
+                        context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                            setPackage(context.packageName)
+                            putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
+                        })
                     }
                 })
             } else {
                 TaskStore.addTask(context, dialogText)
+                val tasks = TaskStore.getTasks(context)
+                val newIndex = tasks.size - 1
+                context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                    setPackage(context.packageName)
+                    putExtra(ScreenCaptureService.EXTRA_NEW_TASK_INDEX, newIndex)
+                })
             }
         } else {
-            // 编辑
+            // 编辑（增量更新）
             TaskStore.updateTask(context, editingIndex, dialogText)
+            // 通知 Service 只更新该索引的通知，避免重建所有通知
+            context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
+                setPackage(context.packageName)
+                putExtra(ScreenCaptureService.EXTRA_EDIT_TASK_INDEX, editingIndex)
+            })
         }
-        
-        // 关键：发送广播通知 Service 刷新通知栏
-        context.sendBroadcast(Intent(ScreenCaptureService.ACTION_REFRESH).apply {
-            setPackage(context.packageName)
-        })
         showDialog = false
     }
 

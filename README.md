@@ -96,6 +96,13 @@ adb logcat -s QuickCaptureTile CaptureStarterActivity ScreenCaptureService
   - 实现细节：异步调用由 `AiNetwork` 发起，回调中写入任务并通过广播 `ScreenCaptureService.ACTION_REFRESH` 更新通知栏；对话在提交后保持当前行为（立即关闭），LLM 在后台运行并在回调时更新数据。
   - 相关文件：`app/src/main/java/com/RSS/todolist/MainActivity.kt`、`app/src/main/java/com/RSS/todolist/data/AiNetwork.kt`、`app/src/main/java/com/RSS/todolist/utils/AiConfigStore.kt`。
 
+- 进一步的通知与刷新改进：
+  - 新增增量通知更新逻辑：新增任务时会发送带 `EXTRA_NEW_TASK_INDEX` 的广播，服务端（`ScreenCaptureService.kt`）只为该索引发布新通知而不清空全部通知，从而避免通知栏闪烁。
+  - 编辑任务也改为增量更新：编辑时会发送 `EXTRA_EDIT_TASK_INDEX`，`ScreenCaptureService` 优先处理该索引（重新发布或取消对应通知），并仅更新主通知摘要（任务计数/文本）。
+  - 为支持增量更新，新增 `addSingleTaskNotification(index)` 帮助方法，并在广播接收逻辑中优先处理 `EXTRA_EDIT_TASK_INDEX`，其次处理 `EXTRA_NEW_TASK_INDEX`，最后才回退到全量刷新（`showTaskNotification()`）。
+  - 修复了 `ScreenCaptureService.kt` 中重复声明 `EXTRA_NEW_TASK_INDEX` 常量导致的编译冲突（重复声明已移除）。
+  - 注意：当前通知 id 仍基于列表索引（`NOTIFICATION_ID_START + index`），索引重排仍可能带来边界情况；推荐后续将任务改为持久 `UUID` 并基于该 `id` 生成稳定的通知 id（README 上下文中已有迁移建议）。
+
 
 **Apply_patch 摘要（供审计）**
 

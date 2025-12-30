@@ -91,7 +91,40 @@ class ScreenCaptureService : Service() {
                     }
                 }
                 ACTION_REFRESH -> {
-                    showTaskNotification()
+                    // 优先处理编辑索引：仅更新该索引通知
+                    val editIndex = intent.getIntExtra(EXTRA_EDIT_TASK_INDEX, -1)
+                    if (editIndex >= 0) {
+                        // 若该任务已被标记完成则取消通知，否则重新发布该条通知
+                        val tasks = TaskStore.getTasks(this@ScreenCaptureService)
+                        if (editIndex < tasks.size) {
+                            val t = tasks[editIndex]
+                            val notifId = NOTIFICATION_ID_START + editIndex
+                            if (t.isCompleted) {
+                                try { notificationManager.cancel(notifId) } catch (e: Exception) { }
+                            } else {
+                                addSingleTaskNotification(editIndex)
+                            }
+                            val activeCount = tasks.count { !it.isCompleted }
+                            val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
+                            val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
+                            notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
+                            return
+                        }
+                    }
+
+                    // 如果携带了新任务索引，则只添加该条通知，避免清空重建所有通知造成闪烁
+                    val newIndex = intent.getIntExtra(EXTRA_NEW_TASK_INDEX, -1)
+                    if (newIndex >= 0) {
+                        addSingleTaskNotification(newIndex)
+                        // 更新主通知计数
+                        val tasks = TaskStore.getTasks(this@ScreenCaptureService)
+                        val activeCount = tasks.count { !it.isCompleted }
+                        val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
+                        val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
+                        notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
+                    } else {
+                        showTaskNotification()
+                    }
                 }
             }
         }
@@ -103,6 +136,8 @@ class ScreenCaptureService : Service() {
         const val ACTION_COMPLETE_TASK = "com.RSS.todolist.ACTION_COMPLETE_TASK"
         const val ACTION_REFRESH = "com.RSS.todolist.ACTION_REFRESH"
         const val EXTRA_TASK_INDEX = "extra_task_index"
+        const val EXTRA_NEW_TASK_INDEX = "extra_new_task_index"
+        const val EXTRA_EDIT_TASK_INDEX = "extra_edit_task_index"
         
         const val NOTIFICATION_ID_MAIN = 1
         const val NOTIFICATION_ID_START = 100
@@ -338,7 +373,15 @@ class ScreenCaptureService : Service() {
                     if (task != "无任务") {
                         Log.d("TodoList", "AI 分析成功: $task")
                         TaskStore.addTask(this@ScreenCaptureService, task)
-                        showTaskNotification()
+                        // 仅添加单条通知，避免刷新全部
+                        val tasks = TaskStore.getTasks(this@ScreenCaptureService)
+                        val newIndex = tasks.size - 1
+                        addSingleTaskNotification(newIndex)
+                        val activeCount = tasks.count { !it.isCompleted }
+                        val mainText = if (activeCount == 0) "暂无待办任务" else "你有 $activeCount 个待办事项"
+                        val mainNotification = createMainNotification(mainText, showClearButton = tasks.isNotEmpty())
+                        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                        notificationManager.notify(NOTIFICATION_ID_MAIN, mainNotification)
                     } else {
                         showTaskNotification()
                     }
@@ -530,6 +573,112 @@ class ScreenCaptureService : Service() {
                 notificationManager.notify(notificationId, taskNotification)
             }
         }
+    }
+
+    // 仅为单个索引创建并发布通知（不清除其它任务通知）
+    private fun addSingleTaskNotification(index: Int) {
+        val tasks = TaskStore.getTasks(this)
+        if (index < 0 || index >= tasks.size) return
+        val task = tasks[index]
+        if (task.isCompleted) return
+
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        val completeIntent = Intent(ACTION_COMPLETE_TASK).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_TASK_INDEX, index)
+        }
+        val completePendingIntent = PendingIntent.getBroadcast(
+            this, index, completeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val rawText = task.text ?: ""
+        val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val titleLine = if (lines.isNotEmpty()) lines[0] else "待办事项 ${index + 1}"
+
+        var title = titleLine.replace(Regex("^##\\s*"), "").replace("**", "").trim()
+        var timeStr = ""
+        var locationStr = ""
+        var keyStr = ""
+        var brandStr = ""
+
+        val rest = if (lines.size > 1) lines.subList(1, lines.size) else emptyList()
+        val brands = listOf("顺丰", "丰巢", "菜鸟", "京东", "EMS", "申通", "中通", "圆通", "安能")
+        for (l in rest) {
+            val low = l.lowercase()
+            val isTime = Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(l) || l.contains("月") || low.contains("今天") || low.contains("明天") || low.contains("今晚") || low.contains("尽快")
+            val isKeyLabel = l.contains("🔑") || l.contains("关键信息") || low.contains("key")
+            val looksLikeCode = Regex("[0-9]{2,}-[0-9A-Za-z-]{2,}|[0-9]{4,}").containsMatchIn(l) || Regex("^[0-9A-Za-z-]{4,}$").matches(l)
+            val foundBrand = brands.firstOrNull { l.contains(it, ignoreCase = true) }
+            if (foundBrand != null && brandStr.isEmpty()) brandStr = foundBrand
+
+            when {
+                isKeyLabel -> keyStr = l.replace(Regex(".*?:\\s*"), "")
+                isTime && timeStr.isEmpty() -> timeStr = l
+                looksLikeCode && keyStr.isEmpty() -> keyStr = l
+                locationStr.isEmpty() -> locationStr = l
+                keyStr.isEmpty() -> keyStr = l
+            }
+        }
+
+        if (timeStr.isEmpty() && rest.isNotEmpty()) {
+            val candidate = rest[0]
+            if (candidate.contains("尽快") || candidate.contains("尽速") || Regex("\\d{1,2}[:：]\\d{2}").containsMatchIn(candidate)) timeStr = candidate
+        }
+        if (keyStr.isEmpty() && rest.isNotEmpty()) {
+            keyStr = rest.last()
+        }
+
+        if (brandStr.isNotEmpty()) {
+            if (locationStr.isNotEmpty() && !brands.any { locationStr.contains(it, ignoreCase = true) }) {
+                locationStr = brandStr + locationStr
+            } else if (locationStr.isEmpty()) {
+                val candidate = rest.firstOrNull { it.contains("站") || it.contains("柜机") || it.contains("驿") || it.contains("点") || it.contains("厅") }
+                if (candidate != null) locationStr = brandStr + candidate else locationStr = brandStr
+            }
+        }
+
+        val contentBuilder = StringBuilder()
+        contentBuilder.append(title)
+        contentBuilder.append("\n\n")
+        contentBuilder.append("⏰ 时间: ")
+        contentBuilder.append(if (timeStr.isNotEmpty()) timeStr else "尽快")
+        contentBuilder.append("\n")
+        contentBuilder.append("📍 地点: ")
+        contentBuilder.append(locationStr)
+        contentBuilder.append("\n")
+        contentBuilder.append("🔑 关键信息: ")
+        contentBuilder.append(keyStr)
+
+        val bigText = SpannableStringBuilder(contentBuilder.toString())
+        if (keyStr.isNotEmpty()) {
+            val full = contentBuilder.toString()
+            val keyLabel = "🔑 关键信息: "
+            val keyStart = full.indexOf(keyLabel)
+            if (keyStart >= 0) {
+                val start = keyStart + keyLabel.length
+                val end = start + keyStr.length
+                bigText.setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                bigText.setSpan(RelativeSizeSpan(1.4f), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+
+        val displayTitle = if (locationStr.isNotBlank()) locationStr else title
+        val displayContent = if (keyStr.isNotBlank()) keyStr else title
+
+        val taskNotification = NotificationCompat.Builder(this, "todo_service")
+            .setContentTitle(displayTitle)
+            .setContentText(displayContent)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setSmallIcon(R.mipmap.ic_launcher_round)
+            .setLargeIcon(BitmapFactory.decodeResource(resources, com.RSS.todolist.R.drawable.gemini_generated_image))
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .addAction(android.R.drawable.checkbox_on_background, "完成", completePendingIntent)
+            .build()
+
+        val notificationId = NOTIFICATION_ID_START + index
+        notificationManager.notify(notificationId, taskNotification)
     }
 
     private fun createMainNotification(text: String, showClearButton: Boolean = false): Notification {
