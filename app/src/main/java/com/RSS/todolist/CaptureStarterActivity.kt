@@ -8,6 +8,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import com.RSS.todolist.service.ScreenCaptureService
+import androidx.core.content.ContextCompat
+import android.util.Log
 
 /**
  * 一个透明的 Activity，只用于请求 MediaProjection 授权并将结果传给 Service。
@@ -27,7 +29,17 @@ class CaptureStarterActivity : ComponentActivity() {
                     putExtra("RESULT_CODE", result.resultCode)
                     putExtra("DATA", result.data)
                 }
-                startForegroundService(serviceIntent)
+                try {
+                    ContextCompat.startForegroundService(this, serviceIntent)
+                } catch (e: Exception) {
+                    // 记录并尝试普通 startService 作为降级（某些设备会限制）
+                    Log.e("CaptureStarter", "startForegroundService 失败，尝试降级 startService", e)
+                    try {
+                        startService(serviceIntent)
+                    } catch (e2: Exception) {
+                        Log.e("CaptureStarter", "startService 也失败", e2)
+                    }
+                }
                 // 退到后台并结束 Activity
                 moveTaskToBack(true)
                 finish()

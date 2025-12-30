@@ -16,13 +16,19 @@ class QuickCaptureTile : TileService() {
             val intent = Intent(this, CaptureStarterActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            // TileService.startActivityAndCollapse may be restricted on some devices/ROMs.
-            // Use a PendingIntent to launch the Activity instead.
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            val pi = PendingIntent.getActivity(this, 0, intent, flags)
-            pi.send()
-            Toast.makeText(this, "正在启动截屏流程...", Toast.LENGTH_SHORT).show()
-            Log.d("QuickCaptureTile", "已通过 PendingIntent 启动 CaptureStarterActivity")
+            // 优先使用 startActivityAndCollapse（更可靠），若被限制则回退到 PendingIntent
+            try {
+                startActivityAndCollapse(intent)
+                Toast.makeText(this, "正在启动截屏流程...", Toast.LENGTH_SHORT).show()
+                Log.d("QuickCaptureTile", "已通过 startActivityAndCollapse 启动 CaptureStarterActivity")
+            } catch (e: Exception) {
+                Log.w("QuickCaptureTile", "startActivityAndCollapse 受限，回退到 PendingIntent", e)
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                val pi = PendingIntent.getActivity(this, 0, intent, flags)
+                pi.send()
+                Toast.makeText(this, "正在启动截屏流程...", Toast.LENGTH_SHORT).show()
+                Log.d("QuickCaptureTile", "已通过 PendingIntent 启动 CaptureStarterActivity")
+            }
         } catch (e: Exception) {
             Log.e("QuickCaptureTile", "启动截屏 Activity 失败", e)
             Toast.makeText(this, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
