@@ -96,6 +96,12 @@ adb logcat -s QuickCaptureTile CaptureStarterActivity ScreenCaptureService
   - 实现细节：异步调用由 `AiNetwork` 发起，回调中写入任务并通过广播 `ScreenCaptureService.ACTION_REFRESH` 更新通知栏；对话在提交后保持当前行为（立即关闭），LLM 在后台运行并在回调时更新数据。
   - 相关文件：`app/src/main/java/com/RSS/todolist/MainActivity.kt`、`app/src/main/java/com/RSS/todolist/data/AiNetwork.kt`、`app/src/main/java/com/RSS/todolist/utils/AiConfigStore.kt`。
 
+- 修复“点击快速设置磁贴后有概率无法进入截屏，需先打开 App 才正常”的问题：
+  - 使用 `unlockAndRun {}` 覆盖锁屏/半锁屏场景。
+  - 统一优先走 `startActivityAndCollapse(PendingIntent)`（比直接 `Intent` 更符合系统对用户触发启动的判定）。
+  - Android 14+ 兜底：`PendingIntent.send(..., ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)`，降低后台启动 Activity 被拦的概率。
+  - 相关文件：`app/src/main/java/com/RSS/todolist/QuickCaptureTile.kt`。
+
 - 进一步的通知与刷新改进：
   - 新增增量通知更新逻辑：新增任务时会发送带 `EXTRA_NEW_TASK_INDEX` 的广播，服务端（`ScreenCaptureService.kt`）只为该索引发布新通知而不清空全部通知，从而避免通知栏闪烁。
   - 编辑任务也改为增量更新：编辑时会发送 `EXTRA_EDIT_TASK_INDEX`，`ScreenCaptureService` 优先处理该索引（重新发布或取消对应通知），并仅更新主通知摘要（任务计数/文本）。
