@@ -90,6 +90,25 @@ adb logcat -s QuickCaptureTile CaptureStarterActivity ScreenCaptureService
   - 行为：勾选后点击保存会异步调用分析模型（使用 `AiConfigStore` 中的分析配置与 Prompt），模型返回的提取结果将作为任务文本加入 `TaskStore`；若模型返回“无任务”或请求失败，则回退保存原始输入文本。
   - 实现细节：异步调用由 `AiNetwork` 发起，回调中写入任务并通过广播 `ScreenCaptureService.ACTION_REFRESH` 更新通知栏；对话在提交后保持当前行为（立即关闭），LLM 在后台运行并在回调时更新数据。
   - 相关文件：`app/src/main/java/com/RSS/todolist/MainActivity.kt`、`app/src/main/java/com/RSS/todolist/data/AiNetwork.kt`、`app/src/main/java/com/RSS/todolist/utils/AiConfigStore.kt`。
+### 2026-01-03
+- 将设置页中所有与日志相关的控件合并到单一“日志与导出”卡片，包含：
+  - Debug 日志开关（开启后保存截图、请求与返回以便调试）。
+  - 导出内容选项：可选择是否包含图片、OCR 文本、OCR Prompt、LLM Prompt、LLM 输出（选择持久化到 `AiConfigStore`）。
+  - 导出并分享按钮：在后台将 `cache/debug_logs/` 下各会话目录按用户选择打包为 ZIP 并通过 `FileProvider` 分享。
+  - 清理功能：按保留天数清理或一键清理全部日志目录。
+
+- 在设置页新增导出选项的持久化接口（`AiConfigStore` 中添加对应的 getter/setter）。导出时的 ZIP 打包逻辑会根据这些选项过滤要加入 ZIP 的文件（例如跳过图片或仅导出文本）。
+
+- 将“默认提示词（供参考）”改为可折叠面板（使用 `AnimatedVisibility`），折叠面板内展示 OCR 与分析模型的内置/保存默认 Prompt，节省设置页垂直空间。
+
+- 对设置页布局进行小幅优化：将导出/清理操作合并在同一卡片内，保留天数与清理按钮在同一行，以便更紧凑地呈现日志管理功能。
+
+- 相关文件：
+  - `app/src/main/java/com/RSS/todolist/SettingsScreen.kt`（合并 UI、折叠默认提示词、导出过滤逻辑）
+  - `app/src/main/java/com/RSS/todolist/utils/AiConfigStore.kt`（新增导出选项持久化接口）
+  - `app/src/main/java/com/RSS/todolist/service/ScreenCaptureService.kt`（调试日志保存点已存在，导出时的文件命名/会话隔离逻辑配合设置页选项工作）
+
+- 注意：请在本地重建并在模拟器/真机上验证导出与分享行为（`FileProvider` 权限、ZIP 内容、以及在不同设备上的分享兼容性）。
 
 - 修复“点击快速设置磁贴后有概率无法进入截屏，需先打开 App 才正常”的问题：
   - 使用 `unlockAndRun {}` 覆盖锁屏/半锁屏场景。
