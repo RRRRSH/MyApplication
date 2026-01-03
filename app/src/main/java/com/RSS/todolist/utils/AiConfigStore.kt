@@ -28,7 +28,7 @@ object AiConfigStore {
     // 更新：支持“同一段 OCR 里有多个待办”，要求输出多个任务块（每个任务一个 ## 小节）。
     // 同时强调地点要包含品牌名（如“顺丰北门驿站”），并尽量把品牌与具体位置合并为单一地点字段。
     private val DEFAULT_ANALYSIS_PROMPT = """
-        # Role
+# Role
     You are an advanced Text Parsing Engine. Your job is to extract ALL actionable To-Do items from OCR text.
 
 # Critical Constraints
@@ -233,6 +233,82 @@ Output plain text only.
             putString("ana_api_key", config.analysis.apiKey)
             putString("ana_model_name", config.analysis.modelName)
             if (config.analysis.appId.isNullOrBlank()) remove("ana_app_id") else putString("ana_app_id", config.analysis.appId)
+        }
+    }
+
+    // 调试日志开关
+    private const val KEY_DEBUG_LOGS = "debug_logs_enabled"
+
+    fun getDebugLoggingEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_DEBUG_LOGS, true)
+    }
+
+    fun saveDebugLoggingEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_DEBUG_LOGS, enabled)
+        }
+    }
+
+    // 导出选项：允许用户选择导出哪些项目（默认大部分为 true）
+    private const val KEY_EXPORT_INCLUDE_IMAGES = "export_include_images"
+    private const val KEY_EXPORT_INCLUDE_OCR_TEXT = "export_include_ocr_text"
+    private const val KEY_EXPORT_INCLUDE_OCR_PROMPT = "export_include_ocr_prompt"
+    private const val KEY_EXPORT_INCLUDE_LLM_PROMPT = "export_include_llm_prompt"
+    private const val KEY_EXPORT_INCLUDE_LLM_OUTPUT = "export_include_llm_output"
+
+    fun getExportIncludeImages(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_EXPORT_INCLUDE_IMAGES, true)
+    }
+
+    fun saveExportIncludeImages(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_EXPORT_INCLUDE_IMAGES, enabled)
+        }
+    }
+
+    fun getExportIncludeOcrText(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_EXPORT_INCLUDE_OCR_TEXT, true)
+    }
+
+    fun saveExportIncludeOcrText(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_EXPORT_INCLUDE_OCR_TEXT, enabled)
+        }
+    }
+
+    fun getExportIncludeOcrPrompt(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_EXPORT_INCLUDE_OCR_PROMPT, true)
+    }
+
+    fun saveExportIncludeOcrPrompt(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_EXPORT_INCLUDE_OCR_PROMPT, enabled)
+        }
+    }
+
+    fun getExportIncludeLlmPrompt(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_EXPORT_INCLUDE_LLM_PROMPT, true)
+    }
+
+    fun saveExportIncludeLlmPrompt(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_EXPORT_INCLUDE_LLM_PROMPT, enabled)
+        }
+    }
+
+    fun getExportIncludeLlmOutput(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_EXPORT_INCLUDE_LLM_OUTPUT, true)
+    }
+
+    fun saveExportIncludeLlmOutput(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_EXPORT_INCLUDE_LLM_OUTPUT, enabled)
         }
     }
 }

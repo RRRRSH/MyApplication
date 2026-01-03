@@ -25,6 +25,11 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.util.Base64
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Locale
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import android.graphics.BitmapFactory
@@ -54,6 +59,9 @@ class ScreenCaptureService : Service() {
     
     private var retryCount = 0
     private val MAX_RETRY = 5 // 增加重试次数
+
+    // 调试日志目录（保存截图、prompt、原始返回等）
+    private var debugFolder: File? = null
 
     // 🌟 新增：后台处理线程，专门干脏活累活
     private lateinit var backgroundThread: HandlerThread
@@ -180,6 +188,64 @@ class ScreenCaptureService : Service() {
         backgroundThread.quitSafely()
     }
 
+    private fun createDebugFolder(): File {
+        try {
+            // 如果用户未开启 debug 日志，则不要创建目录
+            if (!AiConfigStore.getDebugLoggingEnabled(this)) {
+                debugFolder = cacheDir
+                return cacheDir
+            }
+
+            val dir = File(cacheDir, "debug_logs/${System.currentTimeMillis()}")
+            if (!dir.exists()) dir.mkdirs()
+            debugFolder = dir
+            return dir
+        } catch (e: Exception) {
+            Log.e("TodoList", "创建 debug 日志目录失败", e)
+            // 回退到 cacheDir
+            debugFolder = cacheDir
+            return cacheDir
+        }
+    }
+
+    private fun currentTimestamp(): String {
+        return try {
+            val fmt = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
+            fmt.format(System.currentTimeMillis())
+        } catch (e: Exception) {
+            System.currentTimeMillis().toString()
+        }
+    }
+
+    private fun saveTextToDebug(name: String, text: String) {
+        try {
+            if (!AiConfigStore.getDebugLoggingEnabled(this)) return
+            val dir = debugFolder ?: createDebugFolder()
+            val ts = currentTimestamp()
+            val f = File(dir, "${ts}_$name")
+            f.writeText(text)
+            Log.w("TodoList", "调试文件已保存: ${f.absolutePath}")
+        } catch (e: Exception) {
+            Log.e("TodoList", "保存文本调试文件失败: $name", e)
+        }
+    }
+
+    private fun saveBytesToDebug(name: String, bytes: ByteArray) {
+        try {
+            if (!AiConfigStore.getDebugLoggingEnabled(this)) return
+            val dir = debugFolder ?: createDebugFolder()
+            val ts = currentTimestamp()
+            val f = File(dir, "${ts}_$name")
+            val out = FileOutputStream(f)
+            out.write(bytes)
+            out.flush()
+            out.close()
+            Log.w("TodoList", "调试二进制文件已保存: ${f.absolutePath}")
+        } catch (e: Exception) {
+            Log.e("TodoList", "保存二进制调试文件失败: $name", e)
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         if (action == ACTION_INIT) {
@@ -230,6 +296,16 @@ class ScreenCaptureService : Service() {
     
     // 🌟 此方法现在运行在后台线程
     private fun startCapture() {
+        // 每次开始一次新的截屏会话时创建独立的 debug 目录，避免不同会话间文件名冲突被覆盖
+        try {
+            if (AiConfigStore.getDebugLoggingEnabled(this)) {
+                createDebugFolder()
+            } else {
+                debugFolder = cacheDir
+            }
+        } catch (e: Exception) {
+            // 忽略，createDebugFolder 内部会回退到 cacheDir
+        }
         try {
             Log.d("TodoList", "后台线程：创建虚拟屏幕...")
             virtualDisplay = mediaProjection?.createVirtualDisplay(
@@ -271,9 +347,10 @@ class ScreenCaptureService : Service() {
 
                 // 👇👇👇 🌟 新增：保存图片用于调试 (DEBUG) 👇👇👇
                 try {
-                    // 图片会保存在：/data/data/com.RSS.todolist/cache/debug_screenshot.jpg
-                    val file = java.io.File(cacheDir, "debug_screenshot.jpg")
-                    val out = java.io.FileOutputStream(file)
+                    // 图片保存在 debug 目录下，便于收集执行日志
+                    val dir = debugFolder ?: createDebugFolder()
+                    val file = File(dir, "screenshot.jpg")
+                    val out = FileOutputStream(file)
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
                     out.flush()
                     out.close()
@@ -363,7 +440,16 @@ Preserve line breaks.
         // 注意：Base64 编码很耗时，强制放后台线程，避免偶发卡顿
         backgroundHandler.post {
             val quality = if (attempt <= 1) 85 else 95
+            // 保存 OCR prompt 以便导出
+            try { saveTextToDebug("ocr_prompt.txt", prompt) } catch (e: Exception) { }
+
             val base64Img = ImageUtils.bitmapToBase64(bitmap, quality = quality)
+            try {
+                val imgBytes = Base64.decode(base64Img, Base64.DEFAULT)
+                saveBytesToDebug("ocr_image_q${quality}.jpg", imgBytes)
+            } catch (e: Exception) {
+                Log.e("TodoList", "保存 OCR 上传图片失败", e)
+            }
             val contentPart = ContentPart(type = "image_url", image_url = ImageUrl("data:image/jpeg;base64,$base64Img"))
             val textPrompt = ContentPart(type = "text", text = prompt)
             val user = ChatMessage(role = "user", content = listOf(textPrompt, contentPart))
@@ -377,6 +463,12 @@ Preserve line breaks.
                     Log.w("TodoList", "OCR 原始返回内容: [$raw]")
                     Log.w("TodoList", "OCR 提取后内容: [$extracted]")
                     Log.w("TodoList", "OCR 文本长度: ${extracted.length} (attempt=$attempt, jpegQ=$quality)")
+
+                    // 保存 OCR 返回与提取结果
+                    backgroundHandler.post {
+                        try { saveTextToDebug("ocr_raw.txt", raw ?: "") } catch (e: Exception) { }
+                        try { saveTextToDebug("ocr_extracted.txt", extracted) } catch (e: Exception) { }
+                    }
 
                     if (extracted.isBlank() || extracted.length <= 5) {
                         Log.e("TodoList", "OCR 结果太短或为空，视为识别失败")
@@ -472,6 +564,9 @@ Preserve line breaks.
             append(TaskExtraction.formatMultiMessageInput(ocrText))
         }
 
+        // 创建 debug 目录并保存 llm prompt，便于导出
+        try { if (debugFolder == null) createDebugFolder(); saveTextToDebug("llm_prompt.txt", prompt) } catch (e: Exception) { }
+
         val message = ChatMessage(role = "user", content = prompt)
         val request = ChatRequest(model = anaConfig.modelName, messages = listOf(message))
 
@@ -493,6 +588,9 @@ Preserve line breaks.
 
                 // Retrofit 回调通常在主线程；批量写入与通知生成放到后台线程，降低卡顿
                 backgroundHandler.post {
+                    // 保存 LLM 的原始返回与提取结果
+                    try { saveTextToDebug("llm_raw.txt", raw ?: "") } catch (e: Exception) { }
+                    try { saveTextToDebug("llm_extracted_tasks.txt", extracted.joinToString("\n\n")) } catch (e: Exception) { }
                     val range = TaskStore.addTasks(this@ScreenCaptureService, extracted)
                     if (range == null) {
                         showTaskNotification()
